@@ -35,3 +35,5 @@ pixi run test-readback
 
 Push a tag that matches the version in `Cargo.toml` (such as `0.1.0`) from the `main` branch.
 The publish workflow tests, builds binaries for linux x86_64 and macOS arm64, and creates the GitHub release with a changelog from `git-cliff`.
+The release job needs a repository environment named `github`.
+The Linux archive is built on `ubuntu-latest` and needs a matching glibc where it runs.
