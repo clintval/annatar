@@ -201,14 +201,8 @@ fn narrow<'a, 'b>(
 }
 
 fn transcript_number(feature: Option<&str>) -> u64 {
-    let digits: String = feature
-        .map(without_version)
-        .unwrap_or_default()
-        .chars()
-        .rev()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    let digits: String = digits.chars().rev().collect();
+    let id = feature.map(without_version).unwrap_or_default();
+    let digits = &id[id.trim_end_matches(|c: char| c.is_ascii_digit()).len()..];
     digits.parse().unwrap_or(u64::MAX)
 }
 
@@ -290,7 +284,7 @@ pub fn worst_panel_impact(
     candidates
         .iter()
         .map(|&i| &entries[i])
-        .filter(|entry| in_panel(entry, ctx.index, genes) && has_gene(entry, ctx.index))
+        .filter(|entry| in_panel(entry, ctx.index, genes))
         .filter(|entry| {
             entry
                 .get(ctx.index, "Consequence")
@@ -310,6 +304,9 @@ pub fn missing_tie_fields(index: &CsqIndex) -> Vec<&'static str> {
         "CCDS",
         "SWISSPROT",
         "Protein_position",
+        "SYMBOL",
+        "Gene",
+        "Feature",
     ]
     .into_iter()
     .filter(|name| index.position(name).is_none())
@@ -475,13 +472,13 @@ mod tests {
     }
 
     #[test]
-    fn regulatory_entry_without_a_gene_is_not_a_candidate() {
+    fn regulatory_entry_without_a_gene_is_not_inside_a_gene() {
         let index = index_without(&[]);
         let rows = entries(
             &index,
             &[
                 &[("Consequence", "regulatory_region_variant")],
-                &[("Consequence", "intron_variant"), ("SYMBOL", "TP53")],
+                &[("Consequence", "upstream_gene_variant"), ("SYMBOL", "TP53")],
             ],
         );
         let picked = pick_with(&index, &rows, None, None).unwrap();
@@ -682,76 +679,98 @@ mod tests {
         );
     }
 
-    type Row = Vec<(&'static str, &'static str)>;
+    fn picked_among_tied(rows: &[&[(&str, &str)]]) -> usize {
+        let index = index_without(&[]);
+        let full: Vec<Vec<(&str, &str)>> = rows
+            .iter()
+            .map(|extra| {
+                let mut row = vec![("Consequence", "missense_variant"), ("SYMBOL", "TP53")];
+                row.extend_from_slice(extra);
+                row
+            })
+            .collect();
+        let slices: Vec<&[(&str, &str)]> = full.iter().map(Vec::as_slice).collect();
+        let built = entries(&index, &slices);
+        pick_with(&index, &built, None, None).unwrap().entry
+    }
 
     #[test]
-    fn tie_breaks_in_order() {
-        let index = index_without(&[]);
-        let base = [("Consequence", "missense_variant"), ("SYMBOL", "TP53")];
-        let with = |extra: &[(&'static str, &'static str)]| {
-            let mut row = base.to_vec();
-            row.extend_from_slice(extra);
-            row
-        };
-        let cases: Vec<(Vec<Row>, usize)> = vec![
-            (
-                vec![
-                    with(&[("CANONICAL", "YES"), ("Feature", "ENST1")]),
-                    with(&[
-                        ("CANONICAL", "YES"),
-                        ("Feature", "ENST2"),
-                        ("MANE_SELECT", "NM_1"),
-                    ]),
-                ],
-                1,
-            ),
-            (
-                vec![
-                    with(&[("Feature", "ENST1")]),
-                    with(&[("Feature", "ENST2"), ("CCDS", "CCDS1")]),
-                ],
-                1,
-            ),
-            (
-                vec![
-                    with(&[("CCDS", "CCDS1"), ("Feature", "ENST1")]),
-                    with(&[
-                        ("CCDS", "CCDS1"),
-                        ("Feature", "ENST2"),
-                        ("SWISSPROT", "P04637"),
-                    ]),
-                ],
-                1,
-            ),
-            (
-                vec![
-                    with(&[("Protein_position", "306/341"), ("Feature", "ENST1")]),
-                    with(&[("Protein_position", "306-307/393"), ("Feature", "ENST2")]),
-                ],
-                1,
-            ),
-            (
-                vec![
-                    with(&[("Protein_position", "-/393"), ("Feature", "ENST2")]),
-                    with(&[("Protein_position", "306"), ("Feature", "ENST1")]),
-                ],
-                0,
-            ),
-            (
-                vec![
-                    with(&[("Feature", "ENST00000000002.5")]),
-                    with(&[("Feature", "ENST00000000001.9")]),
-                ],
-                1,
-            ),
-            (vec![with(&[]), with(&[("Feature", "ENST00000000009")])], 1),
-        ];
-        for (rows, expected) in cases {
-            let slices: Vec<&[(&str, &str)]> = rows.iter().map(Vec::as_slice).collect();
-            let built = entries(&index, &slices);
-            let picked = pick_with(&index, &built, None, None).unwrap();
-            assert_eq!(picked.entry, expected, "{rows:?}");
-        }
+    fn tie_mane_select_beats_a_canonical_plus_clinical_on_a_lower_id() {
+        let picked = picked_among_tied(&[
+            &[
+                ("Feature", "ENST1"),
+                ("MANE_PLUS_CLINICAL", "NM_1.1"),
+                ("CANONICAL", "YES"),
+            ],
+            &[("Feature", "ENST2"), ("MANE_SELECT", "NM_2.1")],
+        ]);
+        assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn tie_canonical_beats_non_canonical_among_mane_entries() {
+        let picked = picked_among_tied(&[
+            &[("Feature", "ENST1"), ("MANE_PLUS_CLINICAL", "NM_1.1")],
+            &[
+                ("Feature", "ENST2"),
+                ("MANE_PLUS_CLINICAL", "NM_2.1"),
+                ("CANONICAL", "YES"),
+            ],
+        ]);
+        assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn tie_ccds_beats_swissprot_and_a_longer_protein() {
+        let picked = picked_among_tied(&[
+            &[
+                ("Feature", "ENST1"),
+                ("SWISSPROT", "P04637"),
+                ("Protein_position", "1/999"),
+            ],
+            &[("Feature", "ENST2"), ("CCDS", "CCDS11118")],
+        ]);
+        assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn tie_swissprot_beats_a_longer_protein() {
+        let picked = picked_among_tied(&[
+            &[("Feature", "ENST1"), ("Protein_position", "1/999")],
+            &[("Feature", "ENST2"), ("SWISSPROT", "P04637")],
+        ]);
+        assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn tie_longest_protein_reads_the_length_after_the_slash() {
+        let picked = picked_among_tied(&[
+            &[("Feature", "ENST1"), ("Protein_position", "306/341")],
+            &[("Feature", "ENST2"), ("Protein_position", "306-307/393")],
+        ]);
+        assert_eq!(picked, 1);
+        let picked = picked_among_tied(&[
+            &[("Feature", "ENST2"), ("Protein_position", "-/393")],
+            &[("Feature", "ENST1"), ("Protein_position", "306")],
+        ]);
+        assert_eq!(picked, 0);
+    }
+
+    #[test]
+    fn tie_transcript_number_is_numeric_and_ignores_the_version() {
+        let picked = picked_among_tied(&[&[("Feature", "ENST10")], &[("Feature", "ENST9")]]);
+        assert_eq!(picked, 1);
+        let picked = picked_among_tied(&[
+            &[("Feature", "ENST00000000002.5")],
+            &[("Feature", "ENST00000000001.9")],
+        ]);
+        assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn tie_without_a_feature_sorts_last() {
+        let picked = picked_among_tied(&[&[], &[("Feature", "ENST00000000009")]]);
+        assert_eq!(picked, 1);
     }
 
     #[test]
@@ -913,11 +932,88 @@ mod tests {
     #[test]
     fn missing_tie_fields_lists_undeclared_subfields() {
         assert_eq!(missing_tie_fields(&index_without(&[])).len(), 0);
-        let index = index_without(&["CCDS", "Protein_position", "MANE_SELECT"]);
+        let index = index_without(&["CCDS", "Protein_position", "MANE_SELECT", "Gene", "Feature"]);
         assert_eq!(
             missing_tie_fields(&index),
-            ["MANE_SELECT", "CCDS", "Protein_position"]
+            ["MANE_SELECT", "CCDS", "Protein_position", "Gene", "Feature"]
         );
+    }
+
+    #[test]
+    fn worst_panel_impact_counts_an_unranked_term_as_not_inside() {
+        let index = index_without(&[]);
+        let rows = entries(
+            &index,
+            &[&[
+                ("Consequence", "made_up"),
+                ("SYMBOL", "TP53"),
+                ("IMPACT", "HIGH"),
+            ]],
+        );
+        let panel = genes(&["TP53"]);
+        let ctx = PickContext {
+            index: &index,
+            genes: Some(&panel),
+            mane: None,
+        };
+        assert_eq!(worst_panel_impact(&rows, &[0], &ctx), None);
+    }
+
+    #[test]
+    fn mane_table_is_ignored_when_only_one_mane_subfield_is_declared() {
+        let index = index_without(&["MANE_PLUS_CLINICAL"]);
+        let rows = entries(
+            &index,
+            &[
+                &[
+                    ("Consequence", "stop_gained"),
+                    ("SYMBOL", "TP53"),
+                    ("Feature", "ENST2"),
+                ],
+                &[
+                    ("Consequence", "intron_variant"),
+                    ("SYMBOL", "TP53"),
+                    ("Feature", "ENST1"),
+                ],
+            ],
+        );
+        let mane = table(&["ENST1"], &[]);
+        let picked = pick_with(&index, &rows, None, Some(&mane)).unwrap();
+        assert_eq!(
+            picked,
+            Picked {
+                entry: 0,
+                tier: Tier::Other
+            }
+        );
+    }
+
+    #[test]
+    fn tier_strings_are_stable() {
+        assert_eq!(Tier::ManeSelect.as_str(), "mane_select");
+        assert_eq!(Tier::ManePlusClinical.as_str(), "mane_plus_clinical");
+        assert_eq!(Tier::Canonical.as_str(), "canonical");
+        assert_eq!(Tier::Other.as_str(), "other");
+    }
+
+    #[test]
+    fn picked_entry_indexes_into_all_entries_when_candidates_are_a_subset() {
+        let index = index_without(&[]);
+        let rows = entries(
+            &index,
+            &[
+                &[("Consequence", "stop_gained"), ("SYMBOL", "TP53")],
+                &[("Consequence", "intron_variant"), ("SYMBOL", "TP53")],
+                &[("Consequence", "missense_variant"), ("SYMBOL", "TP53")],
+            ],
+        );
+        let ctx = PickContext {
+            index: &index,
+            genes: None,
+            mane: None,
+        };
+        let picked = pick(&rows, &[1, 2], &ctx).unwrap().unwrap();
+        assert_eq!(picked.entry, 2);
     }
 
     #[test]
