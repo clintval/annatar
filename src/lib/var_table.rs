@@ -6,10 +6,10 @@ use polars::prelude::{Categories, Column, DataFrame, DataType, NamedFrom, Series
 
 use crate::alleles::variant_name;
 use crate::consequence::{is_coding, is_lof, most_severe};
-use crate::csq::{CsqEntry, CsqIndex};
+use crate::csq::{CsqEntry, CsqIndex, is_missing};
 use crate::fields::{Exclusions, FieldSpec, Kind, Section};
 use crate::pick::Tier;
-use crate::text::{TextColumn, type_column};
+use crate::text::{CsqColumn, type_column};
 
 const RECORD_NAMES: [&str; 11] = [
     "chrom",
@@ -105,6 +105,12 @@ fn categorical(name: &str, values: Vec<Option<String>>) -> anyhow::Result<Column
         .into())
 }
 
+pub struct VarColumns {
+    pub names: Vec<String>,
+    pub frame: DataFrame,
+    pub nullable: Vec<String>,
+}
+
 pub struct VarTable {
     csq: Option<CsqIndex>,
     csq_columns: Vec<(String, Vec<Option<String>>)>,
@@ -114,19 +120,19 @@ pub struct VarTable {
     names: Vec<String>,
     seen: HashSet<String>,
     chrom: Vec<Option<String>>,
-    pos: Vec<Option<i64>>,
+    pos: Vec<i64>,
     reference: Vec<Option<String>>,
     alt: Vec<Option<String>>,
     id: Vec<Option<String>>,
     qual: Vec<f64>,
     filter: Vec<Option<String>>,
-    n_cells_covered: Vec<Option<i64>>,
-    n_cells_alt: Vec<Option<i64>>,
-    ref_reads: Vec<Option<i64>>,
-    alt_reads: Vec<Option<i64>>,
+    n_cells_covered: Vec<i64>,
+    n_cells_alt: Vec<i64>,
+    ref_reads: Vec<i64>,
+    alt_reads: Vec<i64>,
     consequence_rank: Vec<Option<i64>>,
-    is_coding: Vec<bool>,
-    is_lof: Vec<bool>,
+    is_coding: Vec<Option<bool>>,
+    is_lof: Vec<Option<bool>>,
     pick_tier: Vec<Option<String>>,
     worst_panel_impact: Vec<Option<String>>,
 }
@@ -159,7 +165,7 @@ impl VarTable {
             })
             .map(|(name, kind)| {
                 let taken = RECORD_NAMES.contains(&name.as_str())
-                    || DERIVED_NAMES.contains(&name.as_str())
+                    || (csq.is_some() && DERIVED_NAMES.contains(&name.as_str()))
                     || csq_names.contains(&name);
                 let name = if taken { format!("INFO_{name}") } else { name };
                 (name, InfoColumn::new(kind))
@@ -208,14 +214,20 @@ impl VarTable {
 
         let (rank, coding, lof) = match picked.and_then(|(entry, _)| self.consequence(entry)) {
             Some(consequence) => {
-                let (term, rank) = most_severe(consequence)?;
-                (Some(i64::from(rank)), is_coding(term), is_lof(term))
+                let (term, rank) = most_severe(consequence);
+                (
+                    Some(i64::from(rank)),
+                    Some(is_coding(term)),
+                    Some(is_lof(term)),
+                )
             }
-            None => (None, false, false),
+            None => (None, None, None),
         };
         let name = variant_name(&row.chrom, row.pos, &row.reference, &row.alt);
         if self.seen.contains(&name) {
-            bail!("variant {name} appears more than once");
+            bail!(
+                "variant {name} appears more than once; remove repeats with bcftools norm -d exact"
+            );
         }
         let pos = i64::try_from(row.pos)?;
         let ref_reads = i64::try_from(row.ref_reads)?;
@@ -227,7 +239,7 @@ impl VarTable {
         for ((_, values), position) in self.csq_columns.iter_mut().zip(&self.csq_positions) {
             let value = picked
                 .and_then(|(entry, _)| entry.values.get(*position))
-                .filter(|value| !value.is_empty())
+                .filter(|value| !is_missing(value))
                 .cloned();
             values.push(value);
         }
@@ -235,17 +247,16 @@ impl VarTable {
         self.seen.insert(name.clone());
         self.names.push(name);
         self.chrom.push(Some(row.chrom));
-        self.pos.push(Some(pos));
+        self.pos.push(pos);
         self.reference.push(Some(row.reference));
         self.alt.push(Some(row.alt));
         self.id.push(row.id);
         self.qual.push(row.qual.map_or(f64::NAN, widen));
         self.filter.push(row.filter);
-        self.n_cells_covered
-            .push(Some(i64::from(row.n_cells_covered)));
-        self.n_cells_alt.push(Some(i64::from(row.n_cells_alt)));
-        self.ref_reads.push(Some(ref_reads));
-        self.alt_reads.push(Some(alt_reads));
+        self.n_cells_covered.push(i64::from(row.n_cells_covered));
+        self.n_cells_alt.push(i64::from(row.n_cells_alt));
+        self.ref_reads.push(ref_reads);
+        self.alt_reads.push(alt_reads);
         self.consequence_rank.push(rank);
         self.is_coding.push(coding);
         self.is_lof.push(lof);
@@ -261,11 +272,9 @@ impl VarTable {
         RECORD_NAMES
             .into_iter()
             .chain(self.csq_columns.iter().map(|(name, _)| name.as_str()))
-            .chain(
-                DERIVED_NAMES
-                    .into_iter()
-                    .filter(|name| self.with_genes || *name != "worst_panel_impact"),
-            )
+            .chain(DERIVED_NAMES.into_iter().filter(|name| {
+                self.csq.is_some() && (self.with_genes || *name != "worst_panel_impact")
+            }))
             .chain(self.info.iter().map(|(name, _)| name.as_str()))
             .find(|name| !seen.insert(*name))
     }
@@ -274,7 +283,8 @@ impl VarTable {
         entry.get(self.csq.as_ref()?, "Consequence")
     }
 
-    pub fn finish(self) -> anyhow::Result<(Vec<String>, DataFrame)> {
+    pub fn finish(self) -> anyhow::Result<VarColumns> {
+        let mut nullable = Vec::new();
         let mut columns: Vec<Column> = vec![
             categorical("chrom", self.chrom)?,
             Series::new("pos".into(), self.pos).into(),
@@ -290,25 +300,39 @@ impl VarTable {
         ];
 
         for (name, values) in self.csq_columns {
-            columns.push(match type_column(values) {
-                TextColumn::Float(values) => Series::new(name.as_str().into(), values).into(),
-                TextColumn::Text(values) => categorical(&name, values)?,
+            columns.push(match type_column(&name, values) {
+                CsqColumn::Integer(values) => {
+                    nullable.push(name.clone());
+                    Series::new(name.as_str().into(), values).into()
+                }
+                CsqColumn::Float(values) => Series::new(name.as_str().into(), values).into(),
+                CsqColumn::Text(values) => categorical(&name, values)?,
             });
         }
 
-        columns.push(Series::new("consequence_rank".into(), self.consequence_rank).into());
-        columns.push(Series::new("is_coding".into(), self.is_coding).into());
-        columns.push(Series::new("is_lof".into(), self.is_lof).into());
-        columns.push(categorical("pick_tier", self.pick_tier)?);
-        if self.with_genes {
-            columns.push(categorical("worst_panel_impact", self.worst_panel_impact)?);
+        if self.csq.is_some() {
+            nullable.extend(["consequence_rank", "is_coding", "is_lof"].map(String::from));
+            columns.push(Series::new("consequence_rank".into(), self.consequence_rank).into());
+            columns.push(Series::new("is_coding".into(), self.is_coding).into());
+            columns.push(Series::new("is_lof".into(), self.is_lof).into());
+            columns.push(categorical("pick_tier", self.pick_tier)?);
+            if self.with_genes {
+                columns.push(categorical("worst_panel_impact", self.worst_panel_impact)?);
+            }
         }
 
         for (name, column) in self.info {
+            if matches!(column, InfoColumn::Int(_)) {
+                nullable.push(name.clone());
+            }
             columns.push(column.into_column(&name)?);
         }
 
-        Ok((self.names, DataFrame::new_infer_height(columns)?))
+        Ok(VarColumns {
+            names: self.names,
+            frame: DataFrame::new_infer_height(columns)?,
+            nullable,
+        })
     }
 }
 
@@ -394,13 +418,14 @@ mod tests {
             .collect()
     }
 
-    fn write(names: Vec<String>, var: DataFrame) -> anyhow::Result<()> {
-        let rows = names.len();
+    fn write(columns: VarColumns) -> anyhow::Result<()> {
+        let rows = columns.names.len();
         let output = Output {
             obs_names: vec!["c0".into()],
             obs: DataFrame::empty(),
-            var_names: names,
-            var,
+            var_names: columns.names,
+            var: columns.frame,
+            nullable_var: columns.nullable,
             x: CsrMatrix::try_from_csr_data(1, rows, vec![0, 0], vec![], Vec::<i8>::new()).unwrap(),
             layers: vec![],
             uns: vec![],
@@ -436,7 +461,7 @@ mod tests {
         table
             .push(row(200, "G"), values(false), tier, None)
             .unwrap();
-        let (_, df) = table.finish().unwrap();
+        let df = table.finish().unwrap().frame;
 
         assert_eq!(df.height(), 2);
         for name in ["chrom", "ref", "alt", "id", "filter", "SYMBOL", "pick_tier"] {
@@ -472,7 +497,7 @@ mod tests {
         ];
         let csq = index(&["SYMBOL"]);
         let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), false);
-        let (_, df) = table.finish().unwrap();
+        let df = table.finish().unwrap().frame;
         let names = names(&df);
         for expected in [
             "INFO_SYMBOL",
@@ -491,7 +516,7 @@ mod tests {
         let info = [spec("AF", Shape::RefAlt, Kind::Float)];
         let csq = index(&["AF_ref"]);
         let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), false);
-        let (_, df) = table.finish().unwrap();
+        let df = table.finish().unwrap().frame;
         let names = names(&df);
         assert!(names.contains(&"INFO_AF_ref".to_string()));
         assert!(names.contains(&"AF_alt".to_string()));
@@ -525,7 +550,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let (_, df) = table.finish().unwrap();
+        let df = table.finish().unwrap().frame;
 
         let ints = |name: &str| -> Vec<Option<i64>> {
             df.column(name).unwrap().i64().unwrap().iter().collect()
@@ -585,7 +610,7 @@ mod tests {
         let info = [spec("COSMIC", Shape::Scalar, Kind::Text)];
         let csq = index(&["SYMBOL", "COSMIC"]);
         let table = VarTable::new(&info, Some(&csq), &exclusions, false);
-        let (_, df) = table.finish().unwrap();
+        let df = table.finish().unwrap().frame;
         let names = names(&df);
         assert!(names.contains(&"SYMBOL".to_string()));
         assert!(names.contains(&"COSMIC".to_string()));
@@ -594,11 +619,51 @@ mod tests {
     }
 
     #[test]
+    fn without_csq_derived_names_are_free_and_absent() {
+        let info = [spec("pick_tier", Shape::Scalar, Kind::Text)];
+        let table = VarTable::new(&info, None, &Exclusions::default(), false);
+        assert_eq!(table.duplicate_column(), None);
+        let columns = table.finish().unwrap();
+        let names = names(&columns.frame);
+        assert_eq!(names.len(), RECORD_NAMES.len() + 1);
+        assert_eq!(names.last().unwrap(), "pick_tier");
+        assert_eq!(columns.nullable.len(), 0);
+    }
+
+    #[test]
+    fn only_columns_that_can_be_missing_are_nullable() {
+        let info = [
+            spec("DP", Shape::Scalar, Kind::Integer),
+            spec("AF", Shape::Scalar, Kind::Float),
+            spec("SOLO", Shape::Scalar, Kind::Flag),
+            spec("NOTE", Shape::Scalar, Kind::Text),
+        ];
+        let csq = index(&["STRAND", "REVEL", "SYMBOL"]);
+        let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), false);
+        assert_eq!(
+            table.finish().unwrap().nullable,
+            ["STRAND", "consequence_rank", "is_coding", "is_lof", "DP"]
+        );
+    }
+
+    #[test]
+    fn a_csq_integer_that_fell_back_to_text_is_not_nullable() {
+        let csq = index(&["STRAND"]);
+        let mut table = VarTable::new(&[], Some(&csq), &Exclusions::default(), false);
+        let plus = entry(&["plus"]);
+        let tier = Some((&plus, Tier::Other));
+        table.push(row(1, "T"), vec![], tier, None).unwrap();
+        let columns = table.finish().unwrap();
+        assert!(!columns.nullable.contains(&"STRAND".to_string()));
+        assert!(is_categorical(columns.frame.column("STRAND").unwrap()));
+    }
+
+    #[test]
     fn column_order_is_fixed() {
         let info = [spec("DP", Shape::Scalar, Kind::Integer)];
         let csq = index(&["SYMBOL"]);
         let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), true);
-        let (_, df) = table.finish().unwrap();
+        let df = table.finish().unwrap().frame;
         assert_eq!(
             names(&df),
             [
@@ -629,17 +694,9 @@ mod tests {
         let csq = index(&["Consequence", "SYMBOL"]);
         let mut table = VarTable::new(&[], Some(&csq), &Exclusions::default(), false);
         table.push(row(5, "T"), vec![], None, None).unwrap();
-        let (_, df) = table.finish().unwrap();
+        let df = table.finish().unwrap().frame;
         assert_eq!(df.height(), 1);
-        assert_eq!(
-            df.column("is_lof").unwrap().bool().unwrap().get(0),
-            Some(false)
-        );
-        assert_eq!(
-            df.column("is_coding").unwrap().bool().unwrap().get(0),
-            Some(false)
-        );
-        for name in ["consequence_rank", "pick_tier"] {
+        for name in ["consequence_rank", "is_coding", "is_lof", "pick_tier"] {
             assert_eq!(df.column(name).unwrap().null_count(), 1, "{name}");
         }
         let symbol = df.column("SYMBOL").unwrap();
@@ -672,7 +729,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "variant chr1:100:A:T appears more than once"
+            "variant chr1:100:A:T appears more than once; \
+            remove repeats with bcftools norm -d exact"
         );
         table
             .push(
@@ -682,10 +740,10 @@ mod tests {
                 Some("HIGH"),
             )
             .unwrap();
-        let (names, df) = table.finish().unwrap();
+        let VarColumns { names, frame, .. } = table.finish().unwrap();
         assert_eq!(names.len(), 2);
-        assert_eq!(df.height(), 2);
-        assert!(df.columns().iter().all(|c| c.len() == 2));
+        assert_eq!(frame.height(), 2);
+        assert!(frame.columns().iter().all(|c| c.len() == 2));
     }
 
     #[test]
@@ -711,7 +769,7 @@ mod tests {
             InfoValue::Float(Some(0.9)),
         ];
         table.push(row(1, "T"), values, None, None).unwrap();
-        let (_, df) = table.finish().unwrap();
+        let df = table.finish().unwrap().frame;
         let int = |name: &str| df.column(name).unwrap().i64().unwrap().get(0);
         let float = |name: &str| df.column(name).unwrap().f64().unwrap().get(0);
         assert_eq!(int("DP4_1"), Some(7));
@@ -725,7 +783,7 @@ mod tests {
         let mut table = VarTable::new(&[], None, &Exclusions::default(), false);
         table.push(row(100, "T"), vec![], None, None).unwrap();
         table.push(row(50, "G"), vec![], None, None).unwrap();
-        let (names, _) = table.finish().unwrap();
+        let names = table.finish().unwrap().names;
         assert_eq!(
             names,
             [
@@ -740,12 +798,12 @@ mod tests {
         let info = [spec("DP", Shape::Scalar, Kind::Integer)];
         let csq = index(&["SYMBOL"]);
         let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), true);
-        let (names, df) = table.finish().unwrap();
-        assert_eq!(names.len(), 0);
-        assert_eq!(df.height(), 0);
-        assert_eq!(df.width(), 11 + 1 + 5 + 1);
-        assert!(is_categorical(df.column("SYMBOL").unwrap()));
-        write(names, df).unwrap();
+        let columns = table.finish().unwrap();
+        assert_eq!(columns.names.len(), 0);
+        assert_eq!(columns.frame.height(), 0);
+        assert_eq!(columns.frame.width(), 11 + 1 + 5 + 1);
+        assert!(is_categorical(columns.frame.column("SYMBOL").unwrap()));
+        write(columns).unwrap();
     }
 
     #[test]
@@ -759,7 +817,7 @@ mod tests {
         table
             .push(row(2, "G"), vec![InfoValue::Text(None)], None, None)
             .unwrap();
-        let (names, df) = table.finish().unwrap();
+        let columns = table.finish().unwrap();
         for name in [
             "id",
             "filter",
@@ -768,16 +826,19 @@ mod tests {
             "NOTE",
             "SYMBOL",
         ] {
-            assert_eq!(df.column(name).unwrap().null_count(), 2, "{name}");
+            assert_eq!(
+                columns.frame.column(name).unwrap().null_count(),
+                2,
+                "{name}"
+            );
         }
-        write(names, df).unwrap();
+        write(columns).unwrap();
     }
 
     #[test]
     fn no_csq_rows_write() {
         let mut table = VarTable::new(&[], None, &Exclusions::default(), false);
         table.push(row(1, "T"), vec![], None, None).unwrap();
-        let (names, df) = table.finish().unwrap();
-        write(names, df).unwrap();
+        write(table.finish().unwrap()).unwrap();
     }
 }

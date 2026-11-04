@@ -1,13 +1,15 @@
 use std::path::Path;
 
-use anndata::backend::{Compression, WriteConfig, set_default_write_config};
-use anndata::data::DataFrameIndex;
-use anndata::{AnnData, AnnDataOp, AxisArraysOp, ElemCollectionOp};
+use anndata::backend::{
+    AttributeOp, Compression, GroupOp, StoreOp, WriteConfig, set_default_write_config,
+};
+use anndata::data::{DataFrameIndex, Writable};
+use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend, ElemCollectionOp};
 use anndata_hdf5::H5;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use nalgebra_sparse::CsrMatrix;
 use ndarray::Array1;
-use polars::prelude::DataFrame;
+use polars::prelude::{Column, DataFrame, DataType};
 
 pub enum LayerMatrix {
     I32(CsrMatrix<i32>),
@@ -37,9 +39,47 @@ pub struct Output {
     pub obs: DataFrame,
     pub var_names: Vec<String>,
     pub var: DataFrame,
+    pub nullable_var: Vec<String>,
     pub x: CsrMatrix<i8>,
     pub layers: Vec<(String, LayerMatrix)>,
     pub uns: Vec<(String, UnsValue)>,
+}
+
+fn write_nullable_column(var: &impl GroupOp<H5>, column: &Column) -> Result<()> {
+    let mut group = var.new_group(column.name())?;
+    let encoding = match column.dtype() {
+        DataType::Int64 => {
+            let values = column.i64()?.iter().map(Option::unwrap_or_default);
+            values.collect::<Array1<i64>>().write(&group, "values")?;
+            "nullable-integer"
+        }
+        DataType::Boolean => {
+            let values = column.bool()?.iter().map(Option::unwrap_or_default);
+            values.collect::<Array1<bool>>().write(&group, "values")?;
+            "nullable-boolean"
+        }
+        other => bail!("{} cannot be nullable as {other}", column.name()),
+    };
+    let mask: Array1<bool> = column
+        .is_null()
+        .iter()
+        .map(Option::unwrap_or_default)
+        .collect();
+    mask.write(&group, "mask")?;
+    group.new_attr("encoding-type", encoding)?;
+    group.new_attr("encoding-version", "0.1.0")?;
+    Ok(())
+}
+
+// anndata-rs writes a nullable encoding only for columns that hold a null, so these bypass it.
+fn write_nullable_columns(path: &Path, columns: &[Column], order: Vec<String>) -> Result<()> {
+    let file = H5::open_rw(path)?;
+    let mut var = file.open_group("var")?;
+    for column in columns {
+        write_nullable_column(&var, column)?;
+    }
+    var.new_attr("column-order", order)?;
+    file.close()
 }
 
 pub fn write_h5ad(path: &Path, output: Output) -> Result<()> {
@@ -48,11 +88,24 @@ pub fn write_h5ad(path: &Path, output: Output) -> Result<()> {
         compression: Some(Compression::Gzip(4)),
         block_size: None,
     });
+    let column_order: Vec<String> = output
+        .var
+        .get_column_names()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let nullable = output
+        .nullable_var
+        .iter()
+        .map(|name| Ok(output.var.column(name)?.clone()))
+        .collect::<Result<Vec<Column>>>()?;
+    let plain_var = output.var.drop_many(&output.nullable_var);
+
     let adata = AnnData::<H5>::new(path)?;
     adata.set_obs_names(DataFrameIndex::from(output.obs_names))?;
     adata.set_var_names(DataFrameIndex::from(output.var_names))?;
     adata.set_obs(output.obs)?;
-    adata.set_var(output.var)?;
+    adata.set_var(plain_var)?;
     adata.set_x(output.x)?;
     for (name, matrix) in output.layers {
         match matrix {
@@ -66,7 +119,8 @@ pub fn write_h5ad(path: &Path, output: Output) -> Result<()> {
             UnsValue::List(v) => adata.uns().add(&name, Array1::from(v))?,
         }
     }
-    adata.close()
+    adata.close()?;
+    write_nullable_columns(path, &nullable, column_order)
 }
 
 #[cfg(test)]
@@ -108,6 +162,7 @@ mod tests {
             obs: DataFrame::empty(),
             var_names: vec!["v0".into(), "v1".into()],
             var,
+            nullable_var: vec!["AC".into()],
             x: csr(&[(0, 0, 1i8), (2, 1, 3i8)]),
             layers: vec![
                 (

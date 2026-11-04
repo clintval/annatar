@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use log::warn;
+use log::{info, warn};
 use noodles::vcf::Header;
 use noodles::vcf::header::record::value::Collection;
 use noodles::vcf::header::record::value::map::format;
@@ -17,7 +17,8 @@ use noodles::vcf::variant::record_buf::samples::sample::value::Array as SampleAr
 use noodles::vcf::variant::record_buf::samples::sample::value::genotype::Allele;
 use polars::prelude::{DataFrame, NamedFrom, Series};
 
-use crate::alleles::{is_skipped_alt, vep_alleles};
+use crate::alleles::{is_skipped_alt, is_structural, vep_alleles};
+use crate::consequence::{VEP_RELEASE, rank, vep_major};
 use crate::csq::{CsqEntry, CsqIndex, parse_entries};
 use crate::fields::{Exclusions, FieldPlan, FieldSpec, Kind, Section, Shape, plan_fields};
 use crate::genotype::{covered, genotype_code};
@@ -25,12 +26,16 @@ use crate::h5ad::{LAYER_ENCODING, Output, UnsValue, X_ENCODING, write_h5ad};
 use crate::input::{VariantSource, open_variants};
 use crate::matrix::{Cell, SparseBuilder};
 use crate::pick::{
-    Genes, Hashed, ManeTable, PickContext, Picked, entries_for_allele, missing_tie_fields, pick,
-    read_genes, read_mane_table, worst_panel_impact,
+    AltAllele, Genes, Hashed, ManeTable, PickContext, Picked, allele_values, entries_for_allele,
+    missing_tie_fields, pick, read_genes, read_mane_table, worst_panel_impact,
 };
-use crate::var_table::{InfoValue, RecordRow, VarTable, widen};
+use crate::var_table::{InfoValue, RecordRow, VarColumns, VarTable, widen};
 
-const PICK_RULE: &str = "1. Keep the CSQ entries whose Allele is VEP's allele string for this ALT. \
+const PICK_RULE: &str = "1. Keep this ALT's CSQ entries. A sequence ALT, unless CSQ declares \
+    MINIMISED, keeps the entries whose Allele is VEP's spelling of the ALT. A symbolic ALT, a \
+    breakend or any ALT under MINIMISED keeps its ALLELE_NUM entries when no number passes the \
+    ALT count, else every entry on a record with one ALT whose entries name one allele, else \
+    the entries with VEP's spelling. \
     2. Keep the entries of the genes the variant lies in, preferring the --genes panel; \
     when it lies in no gene, keep every entry. \
     3. Keep the MANE Select and MANE Plus Clinical entries if any, \
@@ -70,7 +75,7 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
         samples,
         records,
     } = open_variants(&config.input, config.threads)?;
-    let csq = CsqIndex::from_header(&header);
+    let csq = read_csq(&header, &config.exclusions)?;
     check_header(&header, csq.as_ref(), &config.exclusions)?;
     let plan = plan_fields(&header, &config.exclusions);
     check_layer_names(&plan)?;
@@ -93,6 +98,9 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
         bail!("two fields make the var column {name}");
     }
     warn_about_header(&header, csq.as_ref());
+    if csq.is_none() {
+        note_no_csq(config, &header);
+    }
     if mane.is_some()
         && csq.as_ref().is_some_and(|index| {
             index.position("MANE_SELECT").is_some()
@@ -116,20 +124,20 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
         n_sites_covered,
         n_sites_alt,
         skipped_alts,
+        structural_without_entry,
         records_without_alt,
         ..
     } = conversion;
-    let (var_names, var) = var.finish()?;
+    let VarColumns {
+        names: var_names,
+        frame: var,
+        nullable: nullable_var,
+    } = var.finish()?;
     let matrices = matrix.finish();
     for (field, count) in &matrices.missing {
         warn!("{field}: missing in {count} of the covered cells");
     }
-    if skipped_alts > 0 {
-        warn!("symbolic ALT alleles skipped: {skipped_alts}");
-    }
-    if records_without_alt > 0 {
-        warn!("records with no ALT skipped: {records_without_alt}");
-    }
+    warn_about_counts(skipped_alts, structural_without_entry, records_without_alt);
 
     let summary = Summary {
         cells: samples.len(),
@@ -145,12 +153,25 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
         obs,
         var_names,
         var,
+        nullable_var,
         x: matrices.x,
         layers: matrices.layers,
         uns,
     };
     write_output(&config.output, output)?;
     Ok(summary)
+}
+
+fn warn_about_counts(skipped_alts: u64, structural_without_entry: u64, records_without_alt: u64) {
+    if skipped_alts > 0 {
+        warn!("*, <*> and <NON_REF> ALT alleles skipped: {skipped_alts}");
+    }
+    if structural_without_entry > 0 {
+        warn!("symbolic or breakend ALT alleles with no CSQ entry: {structural_without_entry}");
+    }
+    if records_without_alt > 0 {
+        warn!("records with no ALT skipped: {records_without_alt}");
+    }
 }
 
 fn check_required_fields(exclusions: &Exclusions) -> anyhow::Result<()> {
@@ -160,10 +181,18 @@ fn check_required_fields(exclusions: &Exclusions) -> anyhow::Result<()> {
     if exclusions.contains(Section::Format, "GT") {
         bail!("FORMAT/GT cannot be excluded: X comes from it");
     }
-    if exclusions.contains(Section::Info, "CSQ") {
-        bail!("INFO/CSQ cannot be excluded: name its subfields as CSQ/subfield");
-    }
     Ok(())
+}
+
+fn read_csq(header: &Header, exclusions: &Exclusions) -> anyhow::Result<Option<CsqIndex>> {
+    if exclusions.contains(Section::Info, "CSQ") {
+        return Ok(None);
+    }
+    let csq = CsqIndex::from_header(header);
+    if csq.is_none() && header.infos().contains_key("CSQ") {
+        bail!("INFO/CSQ has no \"Format: \" list in its Description");
+    }
+    Ok(csq)
 }
 
 fn check_header(
@@ -171,14 +200,11 @@ fn check_header(
     csq: Option<&CsqIndex>,
     exclusions: &Exclusions,
 ) -> anyhow::Result<()> {
-    if csq.is_none() && header.infos().contains_key("CSQ") {
-        bail!("INFO/CSQ has no \"Format: \" list in its Description");
-    }
     if let Some(name) = exclusions.undeclared(header, csq).first() {
         bail!("--exclude-field {name} names nothing in this VCF's header");
     }
     let Some(ad) = header.formats().get("AD") else {
-        bail!("the VCF declares no FORMAT/AD");
+        bail!("the VCF declares no FORMAT/AD; with bcftools mpileup, add --annotate FORMAT/AD");
     };
     if ad.number() != format::Number::ReferenceAlternateBases || ad.ty() != format::Type::Integer {
         bail!("FORMAT/AD must be declared Number=R, Type=Integer");
@@ -208,6 +234,42 @@ fn warn_about_header(header: &Header, csq: Option<&CsqIndex>) {
     let missing = csq.map(missing_tie_fields).unwrap_or_default();
     if !missing.is_empty() {
         warn!("the CSQ header declares no {}", missing.join(", "));
+    }
+    if csq.is_some() {
+        warn_about_vep_version(header);
+    }
+}
+
+fn warn_about_vep_version(header: &Header) {
+    let other = vep_header(header)
+        .iter()
+        .filter_map(|line| vep_major(line.strip_prefix("##VEP=")?))
+        .find(|major| *major != VEP_RELEASE);
+    if let Some(major) = other {
+        warn!(
+            "annotated by VEP {major}, but CSQ types and consequence ranks are pinned to \
+            VEP {VEP_RELEASE}"
+        );
+    }
+}
+
+fn note_no_csq(config: &Config, header: &Header) {
+    info!("no INFO/CSQ to read, so the variants have no annotation");
+    let flags = [
+        (config.genes.is_some(), "--genes".to_string()),
+        (config.mane_table.is_some(), "--mane-table".to_string()),
+    ];
+    let exclusions = config.exclusions.without_csq_to_act_on(header);
+    let unused = flags
+        .into_iter()
+        .filter_map(|(given, flag)| given.then_some(flag))
+        .chain(
+            exclusions
+                .iter()
+                .map(|name| format!("--exclude-field {name}")),
+        );
+    for flag in unused {
+        warn!("{flag} does nothing: there is no INFO/CSQ to act on");
     }
 }
 
@@ -524,28 +586,58 @@ struct Lookups<'a> {
     mane: Option<&'a ManeTable>,
 }
 
+#[derive(Default)]
+struct AltPick {
+    picked: Option<Picked>,
+    worst: Option<&'static str>,
+    without_entry: bool,
+}
+
+fn no_entry_message(entries: &[CsqEntry], index: &CsqIndex, allele: &AltAllele) -> String {
+    let AltAllele { alt, spelling, .. } = allele;
+    let values = allele_values(entries, index).join(", ");
+    let spelled = if spelling.eq_ignore_ascii_case(alt) {
+        String::new()
+    } else {
+        format!(", spelled {spelling} by VEP,")
+    };
+    let numbers_would_help = allele.n_alts > 1
+        && index.position("MINIMISED").is_some()
+        && index.position("ALLELE_NUM").is_none();
+    let remedy = if numbers_would_help {
+        "annotate after splitting, or with VEP's --allele_number for multiallelic --minimal output"
+    } else {
+        "annotate after splitting"
+    };
+    format!("no CSQ entry for ALT {alt}{spelled} among the Allele values {values}; {remedy}")
+}
+
 impl Lookups<'_> {
-    fn pick(
-        &self,
-        entries: &[CsqEntry],
-        allele: &str,
-        alt: &str,
-    ) -> anyhow::Result<(Option<Picked>, Option<&'static str>)> {
+    fn pick(&self, entries: &[CsqEntry], allele: &AltAllele) -> anyhow::Result<AltPick> {
         let index = match self.csq {
             Some(index) if !entries.is_empty() => index,
-            _ => return Ok((None, None)),
+            _ => return Ok(AltPick::default()),
         };
         let candidates = entries_for_allele(entries, index, allele);
-        if candidates.is_empty() && alt != "*" {
-            bail!("no CSQ entry for ALT {alt}");
+        if candidates.is_empty() {
+            if !is_structural(allele.alt) {
+                bail!(no_entry_message(entries, index, allele));
+            }
+            return Ok(AltPick {
+                without_entry: true,
+                ..AltPick::default()
+            });
         }
         let ctx = PickContext {
             index,
             genes: self.genes,
             mane: self.mane,
         };
-        let picked = pick(entries, &candidates, &ctx)?;
-        Ok((picked, worst_panel_impact(entries, &candidates, &ctx)))
+        Ok(AltPick {
+            picked: pick(entries, &candidates, &ctx),
+            worst: worst_panel_impact(entries, &candidates, &ctx),
+            without_entry: false,
+        })
     }
 }
 
@@ -557,7 +649,16 @@ struct Conversion<'a> {
     n_sites_covered: Vec<i64>,
     n_sites_alt: Vec<i64>,
     skipped_alts: u64,
+    structural_without_entry: u64,
     records_without_alt: u64,
+    unranked_terms: HashSet<String>,
+}
+
+fn svtype(record: &RecordBuf) -> Option<&str> {
+    match record.info().get("SVTYPE").flatten() {
+        Some(InfoField::String(svtype)) => Some(svtype),
+        _ => None,
+    }
 }
 
 impl<'a> Conversion<'a> {
@@ -579,22 +680,30 @@ impl<'a> Conversion<'a> {
         Self {
             plan,
             lookups,
-            var: VarTable::new(&plan.info, lookups.csq, exclusions, lookups.genes.is_some()),
+            var: VarTable::new(
+                &plan.info,
+                lookups.csq,
+                exclusions,
+                lookups.csq.is_some() && lookups.genes.is_some(),
+            ),
             matrix: SparseBuilder::new(n_obs, &layers),
             n_sites_covered: vec![0; n_obs],
             n_sites_alt: vec![0; n_obs],
             skipped_alts: 0,
+            structural_without_entry: 0,
             records_without_alt: 0,
+            unranked_terms: HashSet::new(),
         }
     }
 
     fn push_record(&mut self, record: &RecordBuf) -> anyhow::Result<()> {
         let alts = record.alternate_bases().as_ref();
-        let vep = vep_alleles(record.reference_bases(), alts);
+        let vep = vep_alleles(record.reference_bases(), alts, svtype(record));
         let entries = match self.lookups.csq {
             Some(index) => parse_entries(&raw_csq(record), index)?,
             None => Vec::new(),
         };
+        self.warn_about_unranked_terms(&entries);
         let info = read_info(record, &self.plan.info, alts.len())?;
         let n_obs = self.n_sites_covered.len();
         let samples = RecordSamples::read(record, &self.plan.format, n_obs, alts.len())?;
@@ -602,12 +711,23 @@ impl<'a> Conversion<'a> {
             self.records_without_alt += 1;
         }
 
-        for (position, (alt, allele)) in alts.iter().zip(&vep).enumerate() {
+        for (position, (alt, spelling)) in alts.iter().zip(&vep).enumerate() {
             if is_skipped_alt(alt) {
                 self.skipped_alts += 1;
                 continue;
             }
-            let (picked, worst) = self.lookups.pick(&entries, allele, alt)?;
+            let allele = AltAllele {
+                alt,
+                spelling,
+                number: position + 1,
+                n_alts: alts.len(),
+            };
+            let AltPick {
+                picked,
+                worst,
+                without_entry,
+            } = self.lookups.pick(&entries, &allele)?;
+            self.structural_without_entry += u64::from(without_entry);
             let totals = self.push_column(&samples, position);
             let row = RecordRow {
                 chrom: record.reference_sequence_name().to_string(),
@@ -627,6 +747,23 @@ impl<'a> Conversion<'a> {
             self.var.push(row, values, picked, worst)?;
         }
         Ok(())
+    }
+
+    fn warn_about_unranked_terms(&mut self, entries: &[CsqEntry]) {
+        let Some(index) = self.lookups.csq else {
+            return;
+        };
+        let terms = entries
+            .iter()
+            .filter_map(|entry| entry.get(index, "Consequence"))
+            .flat_map(|consequence| consequence.split('&'));
+        for term in terms {
+            if rank(term).is_none() && self.unranked_terms.insert(term.to_string()) {
+                warn!(
+                    "VEP {VEP_RELEASE} does not rank the Consequence term {term}, so it sorts last"
+                );
+            }
+        }
     }
 
     fn push_column(&mut self, samples: &RecordSamples, alt_position: usize) -> ColumnTotals {

@@ -132,28 +132,86 @@ fn symbolic_alts_are_skipped() {
         .arg(data("symbolic.vcf"))
         .assert()
         .success()
-        .stderr(contains("symbolic ALT alleles skipped: 2").count(1));
+        .stderr(contains("*, <*> and <NON_REF> ALT alleles skipped: 3").count(1));
 
     let adata = open(&output);
     assert_eq!(
         adata.var_names().into_vec(),
-        [
-            "chr1:100:AC:AT",
-            "chr1:200:A:G",
-            "chr1:300:A:G",
-            "chr1:300:A:*"
-        ]
+        ["chr1:100:AC:AT", "chr1:200:A:G", "chr1:300:A:G"]
     );
-    let var = adata.read_var().unwrap();
-    let symbol = var.column("SYMBOL").unwrap();
-    assert_eq!(symbol.null_count(), 1);
-    assert!(symbol.get(3).unwrap().is_null());
-    assert!(var.column("Consequence").unwrap().get(3).unwrap().is_null());
-    assert!(var.column("pick_tier").unwrap().get(3).unwrap().is_null());
+}
+
+#[test]
+fn a_structural_alt_with_no_entry_keeps_its_row_and_warns_once() {
+    let dir = TempDir::new().unwrap();
+    let output = output_in(&dir);
+    annatar()
+        .arg("-o")
+        .arg(&output)
+        .arg(data("structural-no-entry.vcf"))
+        .assert()
+        .success()
+        .stderr(contains("symbolic or breakend ALT alleles with no CSQ entry: 2").count(1));
+    assert_eq!(open(&output).n_vars(), 4);
 }
 
 #[rstest]
-#[case("no-ad.vcf", "", "the VCF declares no FORMAT/AD")]
+#[case("no-csq-entry.vcf")]
+#[case("no-csq-entry-allele-number.vcf")]
+#[case("split-after-vep.vcf")]
+#[case("split-after-vep-allele-number.vcf")]
+#[case("pick-then-split.vcf")]
+#[case("single-alt-mismatch.vcf")]
+fn allele_number_is_not_suggested_where_it_would_not_help(#[case] name: &str) {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .arg(data("errors").join(name))
+        .assert()
+        .failure()
+        .stderr(contains("--allele_number").not());
+}
+
+#[test]
+fn a_minimal_breakend_with_no_number_keeps_an_empty_row_and_warns_once() {
+    let dir = TempDir::new().unwrap();
+    let output = output_in(&dir);
+    annatar()
+        .arg("-o")
+        .arg(&output)
+        .arg(data("minimal-no-number.vcf"))
+        .assert()
+        .success()
+        .stderr(contains("symbolic or breakend ALT alleles with no CSQ entry: 1").count(1));
+    assert_eq!(open(&output).n_vars(), 3);
+}
+
+#[rstest]
+#[case("symbolic-csq.vcf")]
+#[case("breakend-csq.vcf")]
+#[case("breakend-reference-side.vcf")]
+#[case("allele-number.vcf")]
+#[case("allele-spelling.vcf")]
+#[case("split-after-vep-snv.vcf")]
+#[case("split-after-vep-breakend.vcf")]
+fn alleles_vep_spells_its_own_way_match_without_warning(#[case] name: &str) {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .arg(data(name))
+        .assert()
+        .success()
+        .stderr(contains("no CSQ entry").not());
+}
+
+#[rstest]
+#[case(
+    "no-ad.vcf",
+    "",
+    "the VCF declares no FORMAT/AD; with bcftools mpileup, add --annotate FORMAT/AD"
+)]
 #[case(
     "ad-number-dot.vcf",
     "",
@@ -179,12 +237,43 @@ fn symbolic_alts_are_skipped() {
     "chr1:100",
     "a CSQ entry has 3 subfields where the header declares 7"
 )]
-#[case("no-csq-entry.vcf", "chr1:100", "no CSQ entry for ALT T")]
-#[case("no-csq-entry-symbolic.vcf", "chr1:100", "no CSQ entry for ALT <DEL>")]
 #[case(
-    "no-csq-entry-breakend.vcf",
+    "no-csq-entry.vcf",
     "chr1:100",
-    "no CSQ entry for ALT A[chr1:500["
+    "no CSQ entry for ALT T among the Allele values G, C; annotate after splitting"
+)]
+#[case(
+    "no-csq-entry-allele-number.vcf",
+    "chr1:100",
+    "no CSQ entry for ALT T among the Allele values G; annotate after splitting"
+)]
+#[case(
+    "split-after-vep.vcf",
+    "chr1:100",
+    "no CSQ entry for ALT AT, spelled T by VEP, among the Allele values G, AT; \
+     annotate after splitting"
+)]
+#[case(
+    "split-after-vep-allele-number.vcf",
+    "chr1:100",
+    "no CSQ entry for ALT AT, spelled T by VEP, among the Allele values G, AT; \
+     annotate after splitting"
+)]
+#[case(
+    "pick-then-split.vcf",
+    "chr1:100",
+    "no CSQ entry for ALT T among the Allele values A; annotate after splitting"
+)]
+#[case(
+    "single-alt-mismatch.vcf",
+    "chr1:100",
+    "no CSQ entry for ALT G among the Allele values T; annotate after splitting"
+)]
+#[case(
+    "minimal-multiallelic.vcf",
+    "chr1:100",
+    "no CSQ entry for ALT ATT, spelled TT by VEP, among the Allele values -, T; \
+     annotate after splitting, or with VEP's --allele_number for multiallelic --minimal output"
 )]
 #[case(
     "layer-collides-with-ad.vcf",
@@ -231,18 +320,13 @@ fn symbolic_alts_are_skipped() {
     "chr1:100",
     "FORMAT/AD holds a negative count, -1"
 )]
-#[case(
-    "unranked-consequence.vcf",
-    "chr1:100",
-    "does not rank the Consequence term 'invented_variant'"
-)]
 #[case("bad-info-value.vcf", "chr1:100", "invalid digit")]
 #[case("bad-format-value.vcf", "chr1:100", "invalid digit")]
 #[case("duplicate-sample.vcf", "", "sample c1 appears more than once")]
 #[case(
     "duplicate-variant.vcf",
     "chr1:100",
-    "variant chr1:100:A:G appears more than once"
+    "variant chr1:100:A:G appears more than once; remove repeats with bcftools norm -d exact"
 )]
 #[case(
     "info-number-a-length.vcf",
@@ -285,7 +369,6 @@ fn an_error_input_fails_naming_the_problem_and_writes_nothing(
 #[rstest]
 #[case("basic.vcf", "FORMAT/AD", "FORMAT/AD is required")]
 #[case("basic.vcf", "FORMAT/GT", "FORMAT/GT cannot be excluded")]
-#[case("basic.vcf", "INFO/CSQ", "INFO/CSQ cannot be excluded")]
 #[case(
     "basic.vcf",
     "CSQ/symbol",
@@ -303,8 +386,8 @@ fn an_error_input_fails_naming_the_problem_and_writes_nothing(
 )]
 #[case(
     "no-csq.vcf",
-    "CSQ/SYMBOL",
-    "--exclude-field CSQ/SYMBOL names nothing in this VCF's header"
+    "INFO/SYMBOL",
+    "--exclude-field INFO/SYMBOL names nothing in this VCF's header"
 )]
 fn an_exclusion_that_cannot_be_honored_is_an_error(
     #[case] name: &str,
@@ -321,6 +404,107 @@ fn an_exclusion_that_cannot_be_honored_is_an_error(
         .failure()
         .stderr(contains(message));
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+const NO_CSQ_NOTE: &str = "no INFO/CSQ to read, so the variants have no annotation";
+
+#[test]
+fn a_header_with_no_csq_gets_one_info_line_and_no_warning() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .arg(data("no-csq.vcf"))
+        .assert()
+        .success()
+        .stderr(contains(NO_CSQ_NOTE).count(1).and(contains("WARN").not()));
+}
+
+#[test]
+fn a_header_with_csq_gets_no_note() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .arg(data("basic.vcf"))
+        .assert()
+        .success()
+        .stderr(contains(NO_CSQ_NOTE).not());
+}
+
+#[rstest]
+#[case("--genes", "panel-genes.txt")]
+#[case("--mane-table", "mane-summary.txt")]
+fn a_lookup_file_warns_when_there_is_no_csq_to_act_on(#[case] flag: &str, #[case] file: &str) {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .arg(flag)
+        .arg(data(file))
+        .arg(data("no-csq.vcf"))
+        .assert()
+        .success()
+        .stderr(
+            contains(format!(
+                "{flag} does nothing: there is no INFO/CSQ to act on"
+            ))
+            .count(1),
+        );
+}
+
+#[rstest]
+#[case("no-csq.vcf", "CSQ/SYMBOL")]
+#[case("no-csq.vcf", "INFO/CSQ")]
+fn an_exclusion_of_absent_annotation_warns(#[case] name: &str, #[case] field: &str) {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .args(["--exclude-field", field])
+        .arg(data(name))
+        .assert()
+        .success()
+        .stderr(
+            contains(format!(
+                "--exclude-field {field} does nothing: there is no INFO/CSQ to act on"
+            ))
+            .count(1),
+        );
+}
+
+#[test]
+fn excluding_info_csq_acts_as_a_header_with_no_csq() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .args(["--exclude-field", "INFO/CSQ"])
+        .args(["--exclude-field", "CSQ/no_such_subfield"])
+        .arg("--genes")
+        .arg(data("panel-genes.txt"))
+        .arg(data("basic.vcf"))
+        .assert()
+        .success()
+        .stderr(
+            contains(NO_CSQ_NOTE)
+                .count(1)
+                .and(contains("--exclude-field INFO/CSQ does nothing").not())
+                .and(contains("--exclude-field CSQ/no_such_subfield does nothing").count(1))
+                .and(contains("--genes does nothing").count(1)),
+        );
+}
+
+#[test]
+fn excluding_info_csq_allows_a_csq_header_with_no_format_list() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .args(["--exclude-field", "INFO/CSQ"])
+        .arg(data("errors/csq-no-format.vcf"))
+        .assert()
+        .success();
 }
 
 #[test]
@@ -546,6 +730,67 @@ fn missing_values_warn_once_per_field() {
 }
 
 #[test]
+fn a_value_failing_its_csq_type_warns_once_per_column() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .arg(data("csq-types-fallback.vcf"))
+        .assert()
+        .success()
+        .stderr(
+            contains("CSQ/STRAND: plus is not an integer, so the column is text in this file")
+                .count(1)
+                .and(contains("CSQ/TSL: 1&2 is not an integer").count(1))
+                .and(contains("CSQ/REVEL_score: nan is not a number").count(1))
+                .and(contains("CSQ/gnomADe_AF: inf is not a number").count(1))
+                .and(contains("CSQ/CADD_PHRED: 1.5abc is not a number").count(1)),
+        );
+}
+
+#[test]
+fn an_unranked_consequence_warns_once_per_term() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .arg(data("unranked-consequence.vcf"))
+        .assert()
+        .success()
+        .stderr(
+            contains("VEP 116 does not rank the Consequence term invented_variant")
+                .count(1)
+                .and(contains("Consequence term other_invented_variant").count(1)),
+        );
+}
+
+#[test]
+fn another_vep_major_warns_once_and_runs() {
+    let dir = TempDir::new().unwrap();
+    let output = output_in(&dir);
+    annatar()
+        .arg("-o")
+        .arg(&output)
+        .arg(data("vep-115.vcf"))
+        .assert()
+        .success()
+        .stderr(contains("annotated by VEP 115").count(1));
+    assert_eq!(open(&output).n_vars(), 5);
+}
+
+#[test]
+fn a_header_with_no_vep_line_gets_no_version_warning() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .arg(data("multiallelic.vcf"))
+        .assert()
+        .success()
+        .stderr(contains("annotated by VEP").not());
+}
+
+#[test]
 fn a_clean_run_has_no_warnings() {
     let dir = TempDir::new().unwrap();
     annatar()
@@ -557,6 +802,77 @@ fn a_clean_run_has_no_warnings() {
         .stderr(contains("WARN").not());
 }
 
+const ESCAPE: &str = "\u{1b}";
+
+fn annatar_with_no_color(value: Option<&str>) -> Command {
+    let mut cmd = Command::cargo_bin("annatar").unwrap();
+    cmd.env_remove("RUST_LOG").env_remove("NO_COLOR");
+    if let Some(value) = value {
+        cmd.env("NO_COLOR", value);
+    }
+    cmd
+}
+
+#[rstest]
+#[case(None)]
+#[case(Some(""))]
+#[case(Some("1"))]
+fn piped_help_has_no_escapes(#[case] no_color: Option<&str>) {
+    annatar_with_no_color(no_color)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(contains("--output").and(contains(ESCAPE).not()));
+}
+
+#[rstest]
+#[case(None)]
+#[case(Some(""))]
+#[case(Some("1"))]
+fn a_piped_usage_error_has_no_escapes(#[case] no_color: Option<&str>) {
+    annatar_with_no_color(no_color)
+        .arg("--bogus")
+        .assert()
+        .failure()
+        .stderr(contains("--bogus").and(contains(ESCAPE).not()));
+}
+
+#[rstest]
+#[case(None)]
+#[case(Some(""))]
+#[case(Some("1"))]
+fn piped_help_for_no_arguments_has_no_escapes(#[case] no_color: Option<&str>) {
+    annatar_with_no_color(no_color)
+        .assert()
+        .failure()
+        .stderr(contains("--output").and(contains(ESCAPE).not()));
+}
+
+#[rstest]
+#[case(None)]
+#[case(Some(""))]
+#[case(Some("1"))]
+fn a_failing_run_has_no_escapes_in_a_pipe(#[case] no_color: Option<&str>) {
+    let dir = TempDir::new().unwrap();
+    annatar_with_no_color(no_color)
+        .arg("-o")
+        .arg(output_in(&dir))
+        .arg(data("errors/ad-length.vcf"))
+        .assert()
+        .failure()
+        .stderr(contains("ERROR").and(contains(ESCAPE).not()));
+}
+
+#[test]
+fn forcing_color_in_the_environment_does_not_color_a_pipe() {
+    annatar_with_no_color(None)
+        .env("CLICOLOR_FORCE", "1")
+        .arg("--bogus")
+        .assert()
+        .failure()
+        .stderr(contains(ESCAPE).not());
+}
+
 #[test]
 fn the_help_lists_every_flag() {
     annatar().arg("--help").assert().success().stdout(
@@ -566,6 +882,7 @@ fn the_help_lists_every_flag() {
             .and(contains("--exclude-field"))
             .and(contains("--threads"))
             .and(contains("MIT License"))
+            .and(contains("VEP-annotated multi-sample").not())
             .and(contains("`").not()),
     );
 }

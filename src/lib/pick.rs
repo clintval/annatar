@@ -8,7 +8,8 @@ use anyhow::{Context, anyhow, bail};
 use flate2::read::MultiGzDecoder;
 use sha2::{Digest, Sha256};
 
-use crate::consequence::{impact_rank, is_up_or_downstream, most_severe};
+use crate::alleles::{is_breakend, is_structural};
+use crate::consequence::{UNRANKED, impact_rank, is_up_or_downstream, most_severe};
 use crate::csq::{CsqEntry, CsqIndex};
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -196,15 +197,10 @@ fn mane_tier(entry: &CsqEntry, ctx: &PickContext) -> Option<Tier> {
     }
 }
 
-fn score<'a>(
-    position: usize,
-    entry: &'a CsqEntry,
-    ctx: &PickContext,
-) -> anyhow::Result<Scored<'a>> {
-    let consequence = entry
+fn score<'a>(position: usize, entry: &'a CsqEntry, ctx: &PickContext) -> Scored<'a> {
+    let (term, rank) = entry
         .get(ctx.index, "Consequence")
-        .ok_or_else(|| anyhow!("a CSQ entry has no Consequence"))?;
-    let (term, rank) = most_severe(consequence)?;
+        .map_or(("", UNRANKED), most_severe);
     let mane = mane_tier(entry, ctx);
     let canonical = entry.get(ctx.index, "CANONICAL") == Some("YES");
     let tier = mane.unwrap_or(if canonical {
@@ -212,7 +208,7 @@ fn score<'a>(
     } else {
         Tier::Other
     });
-    Ok(Scored {
+    Scored {
         position,
         entry,
         rank,
@@ -220,7 +216,7 @@ fn score<'a>(
         mane,
         tier,
         canonical,
-    })
+    }
 }
 
 fn narrow<'a, 'b>(
@@ -245,24 +241,88 @@ fn protein_length(entry: &CsqEntry, index: &CsqIndex) -> u64 {
         .unwrap_or(0)
 }
 
-pub fn entries_for_allele(entries: &[CsqEntry], index: &CsqIndex, allele: &str) -> Vec<usize> {
-    (0..entries.len())
-        .filter(|&i| entries[i].get(index, "Allele") == Some(allele))
-        .collect()
+#[derive(Clone, Copy, Debug)]
+pub struct AltAllele<'a> {
+    pub alt: &'a str,
+    pub spelling: &'a str,
+    pub number: usize,
+    pub n_alts: usize,
 }
 
-pub fn pick(
+fn numbered_entries(
     entries: &[CsqEntry],
-    candidates: &[usize],
-    ctx: &PickContext,
-) -> anyhow::Result<Option<Picked>> {
-    let scored = candidates
+    index: &CsqIndex,
+    allele: &AltAllele,
+) -> Option<Vec<usize>> {
+    index.position("ALLELE_NUM")?;
+    let number_of = |entry: &CsqEntry| entry.get(index, "ALLELE_NUM")?.parse::<usize>().ok();
+    if entries
+        .iter()
+        .filter_map(number_of)
+        .any(|n| n > allele.n_alts)
+    {
+        return None;
+    }
+    let numbered = |number: usize| -> Vec<usize> {
+        (0..entries.len())
+            .filter(|&i| number_of(&entries[i]) == Some(number))
+            .collect()
+    };
+    let own = numbered(allele.number);
+    Some(if own.is_empty() && is_breakend(allele.alt) {
+        numbered(0)
+    } else {
+        own
+    })
+}
+
+pub fn entries_for_allele(
+    entries: &[CsqEntry],
+    index: &CsqIndex,
+    allele: &AltAllele,
+) -> Vec<usize> {
+    let spelled = || -> Vec<usize> {
+        (0..entries.len())
+            .filter(|&i| {
+                entries[i]
+                    .get(index, "Allele")
+                    .is_some_and(|value| value.eq_ignore_ascii_case(allele.spelling))
+            })
+            .collect()
+    };
+    if !is_structural(allele.alt) && index.position("MINIMISED").is_none() {
+        return spelled();
+    }
+    if let Some(numbered) = numbered_entries(entries, index, allele) {
+        return numbered;
+    }
+    if allele.n_alts == 1 && allele_values(entries, index).len() == 1 {
+        return (0..entries.len()).collect();
+    }
+    spelled()
+}
+
+pub fn allele_values<'a>(entries: &'a [CsqEntry], index: &CsqIndex) -> Vec<&'a str> {
+    let mut values = Vec::new();
+    for value in entries
+        .iter()
+        .filter_map(|entry| entry.get(index, "Allele"))
+    {
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    values
+}
+
+pub fn pick(entries: &[CsqEntry], candidates: &[usize], ctx: &PickContext) -> Option<Picked> {
+    let scored: Vec<Scored> = candidates
         .iter()
         .map(|&i| score(i, &entries[i], ctx))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .collect();
     let mut pool: Vec<&Scored> = scored.iter().collect();
     if pool.is_empty() {
-        return Ok(None);
+        return None;
     }
 
     if pool.iter().any(|s| s.inside) {
@@ -299,10 +359,10 @@ pub fn pick(
         )
     };
     let winner = pool.into_iter().min_by_key(key).expect("pool is not empty");
-    Ok(Some(Picked {
+    Some(Picked {
         entry: winner.position,
         tier: winner.tier,
-    }))
+    })
 }
 
 pub fn worst_panel_impact(
@@ -319,8 +379,7 @@ pub fn worst_panel_impact(
         .filter(|entry| {
             entry
                 .get(ctx.index, "Consequence")
-                .and_then(|consequence| most_severe(consequence).ok())
-                .is_some_and(|(term, _)| !is_up_or_downstream(term))
+                .is_none_or(|consequence| !is_up_or_downstream(most_severe(consequence).0))
         })
         .filter_map(|entry| impact_rank(entry.get(ctx.index, "IMPACT")?))
         .min()
@@ -329,6 +388,7 @@ pub fn worst_panel_impact(
 
 pub fn missing_tie_fields(index: &CsqIndex) -> Vec<&'static str> {
     [
+        "Consequence",
         "MANE_SELECT",
         "MANE_PLUS_CLINICAL",
         "CANONICAL",
@@ -404,6 +464,15 @@ mod tests {
         }
     }
 
+    fn spelled(spelling: &str, number: usize) -> AltAllele<'_> {
+        AltAllele {
+            alt: spelling,
+            spelling,
+            number,
+            n_alts: 3,
+        }
+    }
+
     fn pick_with(
         index: &CsqIndex,
         entries: &[CsqEntry],
@@ -411,7 +480,7 @@ mod tests {
         mane: Option<&ManeTable>,
     ) -> Option<Picked> {
         let ctx = PickContext { index, genes, mane };
-        pick(entries, &all(entries), &ctx).unwrap()
+        pick(entries, &all(entries), &ctx)
     }
 
     #[test]
@@ -830,14 +899,14 @@ mod tests {
     fn missing_star_entry_is_none() {
         let index = index_without(&[]);
         let rows = entries(&index, &[&[("Consequence", "intron_variant")]]);
-        let found = entries_for_allele(&rows, &index, "*");
+        let found = entries_for_allele(&rows, &index, &spelled("*", 1));
         assert_eq!(found.len(), 0);
         let ctx = PickContext {
             index: &index,
             genes: None,
             mane: None,
         };
-        assert_eq!(pick(&rows, &found, &ctx).unwrap(), None);
+        assert_eq!(pick(&rows, &found, &ctx), None);
     }
 
     #[test]
@@ -845,33 +914,212 @@ mod tests {
         let index = index_without(&[]);
         let mut rows = entries(&index, &[&[("Consequence", "intron_variant")][..]; 3]);
         rows[1].values[0] = "-".to_string();
-        assert_eq!(entries_for_allele(&rows, &index, "T"), [0, 2]);
-        assert_eq!(entries_for_allele(&rows, &index, "-"), [1]);
+        assert_eq!(entries_for_allele(&rows, &index, &spelled("T", 1)), [0, 2]);
+        assert_eq!(entries_for_allele(&rows, &index, &spelled("-", 2)), [1]);
     }
 
     #[test]
-    fn missing_consequence_is_an_error() {
+    fn entries_for_allele_ignores_case() {
         let index = index_without(&[]);
+        let rows = entries(&index, &[&[("Consequence", "intron_variant")]]);
+        assert_eq!(entries_for_allele(&rows, &index, &spelled("t", 1)), [0]);
+    }
+
+    fn names(names: &[&str]) -> CsqIndex {
+        CsqIndex {
+            names: names.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    fn allele_rows(index: &CsqIndex, rows: &[(&str, &str)]) -> Vec<CsqEntry> {
+        let number = index.position("ALLELE_NUM");
+        rows.iter()
+            .map(|(allele, allele_num)| {
+                let mut values = vec![String::new(); index.names.len()];
+                values[0] = (*allele).to_string();
+                if let Some(number) = number {
+                    values[number] = (*allele_num).to_string();
+                }
+                CsqEntry { values }
+            })
+            .collect()
+    }
+
+    fn alt<'a>(alt: &'a str, spelling: &'a str, number: usize, n_alts: usize) -> AltAllele<'a> {
+        AltAllele {
+            alt,
+            spelling,
+            number,
+            n_alts,
+        }
+    }
+
+    #[test]
+    fn a_sequence_alt_matches_on_spelling_and_never_on_a_stale_number() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("A", "1"), ("T", "2")]);
+        assert_eq!(entries_for_allele(&rows, &index, &alt("T", "T", 1, 1)), [1]);
+    }
+
+    #[test]
+    fn a_sequence_alt_does_not_take_a_lone_entry_of_another_allele() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("A", "1")]);
+        assert_eq!(
+            entries_for_allele(&rows, &index, &alt("T", "T", 1, 1)).len(),
+            0
+        );
+    }
+
+    #[test]
+    fn minimised_output_numbers_a_sequence_alt() {
+        let index = names(&["Allele", "ALLELE_NUM", "MINIMISED"]);
+        let rows = allele_rows(&index, &[("T", "2"), ("-", "1")]);
+        assert_eq!(
+            entries_for_allele(&rows, &index, &alt("ATT", "TT", 2, 3)),
+            [0]
+        );
+    }
+
+    #[test]
+    fn minimised_output_with_no_numbers_keeps_one_named_allele_on_a_single_alt() {
+        let index = names(&["Allele", "MINIMISED"]);
+        let rows = allele_rows(&index, &[("T", ""), ("T", "")]);
+        assert_eq!(
+            entries_for_allele(&rows, &index, &alt("CT", "CT", 1, 1)),
+            [0, 1]
+        );
+    }
+
+    #[test]
+    fn minimised_output_with_two_alleles_falls_to_spelling() {
+        let index = names(&["Allele", "MINIMISED"]);
+        let rows = allele_rows(&index, &[("T", ""), ("G", "")]);
+        assert_eq!(entries_for_allele(&rows, &index, &alt("A", "G", 1, 1)), [1]);
+    }
+
+    #[test]
+    fn a_structural_number_counts_skipped_alts() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("deletion", "1"), ("deletion", "2")]);
+        assert_eq!(
+            entries_for_allele(&rows, &index, &alt("<DEL>", "deletion", 2, 2)),
+            [1]
+        );
+    }
+
+    #[test]
+    fn a_structural_alt_with_no_number_of_its_own_matches_nothing() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("deletion", "1"), ("deletion", "0")]);
+        assert_eq!(
+            entries_for_allele(&rows, &index, &alt("<DEL>", "deletion", 2, 2)).len(),
+            0
+        );
+    }
+
+    #[test]
+    fn numbers_past_the_alt_count_are_ignored() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(
+            &index,
+            &[("C.", "0"), ("C[chr1:5[", "1"), ("C[chr1:6[", "2")],
+        );
+        let allele = alt("C[chr1:6[", "C[chr1:6[", 1, 1);
+        assert_eq!(entries_for_allele(&rows, &index, &allele), [2]);
+    }
+
+    #[test]
+    fn a_breakend_with_no_entry_for_its_number_keeps_the_reference_side() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("C.", "0"), ("C.", "0")]);
+        let allele = alt("C[chr9:5[", "C[chr9:5[", 1, 1);
+        assert_eq!(entries_for_allele(&rows, &index, &allele), [0, 1]);
+    }
+
+    #[test]
+    fn a_breakend_with_its_own_number_leaves_out_the_reference_side() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("C.", "0"), ("C[chr1:5[", "1")]);
+        let allele = alt("C[chr1:5[", "C[chr1:5[", 1, 1);
+        assert_eq!(entries_for_allele(&rows, &index, &allele), [1]);
+    }
+
+    #[test]
+    fn a_breakend_with_only_its_reference_side_and_no_numbers_keeps_it() {
+        let index = index_without(&[]);
+        let rows = allele_rows(&index, &[("C.", "")]);
+        let allele = alt("C[chr9:5[", "C[chr9:5[", 1, 1);
+        assert_eq!(entries_for_allele(&rows, &index, &allele), [0]);
+    }
+
+    #[test]
+    fn a_breakend_leaves_out_the_reference_side_by_spelling() {
+        let index = index_without(&[]);
+        let rows = allele_rows(&index, &[("C.", ""), ("C[chr1:5[", "")]);
+        let allele = alt("C[chr1:5[", "C[chr1:5[", 1, 1);
+        assert_eq!(entries_for_allele(&rows, &index, &allele), [1]);
+    }
+
+    #[test]
+    fn a_minimal_breakend_with_no_numbers_matches_nothing() {
+        let index = names(&["Allele", "MINIMISED"]);
+        let rows = allele_rows(&index, &[(".N", ""), ("[chr1:5[", "")]);
+        let allele = alt("C[chr1:5[", "C[chr1:5[", 1, 1);
+        assert_eq!(entries_for_allele(&rows, &index, &allele).len(), 0);
+    }
+
+    #[test]
+    fn a_symbolic_alt_on_a_single_alt_record_keeps_one_named_allele() {
+        let index = index_without(&[]);
+        let rows = allele_rows(&index, &[("copy_number_variation", "")]);
+        assert_eq!(
+            entries_for_allele(&rows, &index, &alt("<STR4>", "<STR4>", 1, 1)),
+            [0]
+        );
+    }
+
+    #[test]
+    fn allele_values_are_distinct_in_first_seen_order() {
+        let index = index_without(&[]);
+        let rows = allele_rows(&index, &[("G", ""), ("C", ""), ("G", "")]);
+        assert_eq!(allele_values(&rows, &index), ["G", "C"]);
+    }
+
+    #[test]
+    fn an_unranked_term_loses_to_any_known_term() {
+        let index = index_without(&[]);
+        let rows = entries(
+            &index,
+            &[
+                &[("Consequence", "made_up"), ("SYMBOL", "TP53")],
+                &[("Consequence", "intron_variant"), ("SYMBOL", "TP53")],
+            ],
+        );
+        let picked = pick_with(&index, &rows, None, None).unwrap();
+        assert_eq!(picked.entry, 1);
+    }
+
+    #[test]
+    fn an_entry_with_no_consequence_sorts_with_the_unranked() {
+        let index = index_without(&[]);
+        let rows = entries(
+            &index,
+            &[
+                &[("SYMBOL", "TP53")],
+                &[("Consequence", "intron_variant"), ("SYMBOL", "TP53")],
+            ],
+        );
+        let picked = pick_with(&index, &rows, None, None).unwrap();
+        assert_eq!(picked.entry, 1);
+    }
+
+    #[test]
+    fn a_header_with_no_consequence_still_picks() {
+        let index = index_without(&["Consequence"]);
         let rows = entries(&index, &[&[("SYMBOL", "TP53")]]);
-        let ctx = PickContext {
-            index: &index,
-            genes: None,
-            mane: None,
-        };
-        let error = pick(&rows, &[0], &ctx).unwrap_err();
-        assert_eq!(error.to_string(), "a CSQ entry has no Consequence");
-    }
-
-    #[test]
-    fn unranked_term_is_an_error() {
-        let index = index_without(&[]);
-        let rows = entries(&index, &[&[("Consequence", "made_up")]]);
-        let ctx = PickContext {
-            index: &index,
-            genes: None,
-            mane: None,
-        };
-        assert!(pick(&rows, &[0], &ctx).is_err());
+        assert!(pick_with(&index, &rows, None, None).is_some());
+        assert_eq!(missing_tie_fields(&index), ["Consequence"]);
     }
 
     #[test]
@@ -971,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn worst_panel_impact_counts_an_unranked_term_as_not_inside() {
+    fn worst_panel_impact_counts_an_unranked_term_as_inside() {
         let index = index_without(&[]);
         let rows = entries(
             &index,
@@ -987,7 +1235,7 @@ mod tests {
             genes: Some(&panel),
             mane: None,
         };
-        assert_eq!(worst_panel_impact(&rows, &[0], &ctx), None);
+        assert_eq!(worst_panel_impact(&rows, &[0], &ctx), Some("HIGH"));
     }
 
     #[test]
@@ -1043,7 +1291,7 @@ mod tests {
             genes: None,
             mane: None,
         };
-        let picked = pick(&rows, &[1, 2], &ctx).unwrap().unwrap();
+        let picked = pick(&rows, &[1, 2], &ctx).unwrap();
         assert_eq!(picked.entry, 2);
     }
 

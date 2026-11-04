@@ -63,19 +63,31 @@ impl Exclusions {
         self.0.contains(&(section, id.to_string()))
     }
 
-    pub fn undeclared(&self, header: &Header, csq: Option<&CsqIndex>) -> Vec<String> {
+    fn sorted_names(&self, keep: impl Fn(Section, &str) -> bool) -> Vec<String> {
         let mut names: Vec<String> = self
             .0
             .iter()
-            .filter(|(section, id)| match section {
-                Section::Info => !header.infos().contains_key(id),
-                Section::Format => !header.formats().contains_key(id),
-                Section::Csq => csq.is_none_or(|index| index.position(id).is_none()),
-            })
+            .filter(|(section, id)| keep(*section, id))
             .map(|(section, id)| format!("{}/{id}", section.as_str()))
             .collect();
         names.sort_unstable();
         names
+    }
+
+    pub fn undeclared(&self, header: &Header, csq: Option<&CsqIndex>) -> Vec<String> {
+        self.sorted_names(|section, id| match section {
+            Section::Info => id != "CSQ" && !header.infos().contains_key(id),
+            Section::Format => !header.formats().contains_key(id),
+            Section::Csq => csq.is_some_and(|index| index.position(id).is_none()),
+        })
+    }
+
+    pub fn without_csq_to_act_on(&self, header: &Header) -> Vec<String> {
+        self.sorted_names(|section, id| match section {
+            Section::Info => id == "CSQ" && !header.infos().contains_key(id),
+            Section::Format => false,
+            Section::Csq => true,
+        })
     }
 }
 
@@ -231,12 +243,21 @@ mod tests {
     }
 
     #[test]
-    fn csq_exclusions_are_undeclared_without_csq() {
+    fn annotation_exclusions_are_not_undeclared_without_csq() {
         let header = header_of("no-csq.vcf");
+        let items = exclusions(&["CSQ/SYMBOL", "INFO/CSQ", "INFO/Z"]);
+        assert_eq!(items.undeclared(&header, None), ["INFO/Z"]);
         assert_eq!(
-            exclusions(&["CSQ/SYMBOL"]).undeclared(&header, None),
-            ["CSQ/SYMBOL"]
+            items.without_csq_to_act_on(&header),
+            ["CSQ/SYMBOL", "INFO/CSQ"]
         );
+    }
+
+    #[test]
+    fn info_csq_has_something_to_act_on_when_the_header_declares_it() {
+        let header = header_of("basic.vcf");
+        let items = exclusions(&["INFO/CSQ"]);
+        assert_eq!(items.without_csq_to_act_on(&header).len(), 0);
     }
 
     fn bcftools_plan(exclusions: &[&str]) -> FieldPlan {

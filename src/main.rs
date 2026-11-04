@@ -1,5 +1,6 @@
-//! Convert a VEP-annotated multi-sample VCF of single cells into an `AnnData` h5ad.
-use std::ffi::OsString;
+//! Convert a multi-sample VCF of single cells into an `AnnData` h5ad.
+use std::ffi::{OsStr, OsString};
+use std::io::{IsTerminal, Write};
 use std::num::NonZero;
 use std::path::PathBuf;
 use std::process;
@@ -34,11 +35,12 @@ const CARGO_STYLING: Styles = Styles::styled()
     .valid(VALID)
     .invalid(INVALID);
 
-/// Convert a VEP-annotated multi-sample VCF of single cells into an h5ad.
+/// Convert a multi-sample VCF of single cells into an h5ad.
 ///
 /// Each VCF sample becomes a cell in `obs` and each ALT allele a variant in
-/// `var`. `X` holds a genotype code per cell and variant, numeric FORMAT
-/// fields become sparse layers, and one VEP consequence is picked per ALT.
+/// `var`. `X` holds a genotype code per cell and variant, and numeric FORMAT
+/// fields become sparse layers. VEP annotation is optional: with `INFO/CSQ`,
+/// one consequence is picked per ALT and becomes typed `var` columns.
 /// The file is written once the whole VCF has been read, so a failed run
 /// leaves no output.
 ///
@@ -51,14 +53,13 @@ const CARGO_STYLING: Styles = Styles::styled()
 ///
 /// EXAMPLES
 ///
-///   annatar --output 'cells.h5ad' 'cells.vep.vcf.gz'
+///   annatar --output 'cells.h5ad' 'cells.vcf.gz'
 ///   annatar --genes 'panel-genes.txt' --output 'cells.h5ad' 'cells.vep.vcf.gz'
-///   bcftools view 'cells.vep.bcf' | annatar --output 'cells.h5ad'
+///   bcftools view 'cells.bcf' | annatar --output 'cells.h5ad'
 #[derive(Debug, Parser)]
 #[command(
     author,
     version,
-    color = clap::ColorChoice::Always,
     rename_all = "kebab-case",
     verbatim_doc_comment,
     arg_required_else_help = true
@@ -92,7 +93,9 @@ struct Cli {
     ///
     /// Repeat the flag to leave out several, such as
     /// `CSQ/Existing_variation`, `CSQ/SOMATIC` and `CSQ/PHENO`. A name must match
-    /// the header exactly: one it does not declare is an error.
+    /// the header exactly: one it does not declare is an error, except that
+    /// `CSQ/subfield` only warns when there is no `INFO/CSQ`. `INFO/CSQ` drops all
+    /// annotation.
     #[arg(long, value_name = "FIELD", verbatim_doc_comment)]
     exclude_field: Vec<Exclusion>,
 
@@ -115,25 +118,32 @@ fn output_path(path: OsString) -> Result<PathBuf, String> {
     }
 }
 
-fn esc(style: Style, color: bool) -> String {
+fn wants_color(no_color: Option<&OsStr>, is_terminal: bool) -> bool {
+    is_terminal && no_color.is_none_or(OsStr::is_empty)
+}
+
+fn rendered(error: &clap::Error, color: bool) -> String {
+    let styled = error.render();
     if color {
-        style.render().to_string()
+        styled.ansi().to_string()
     } else {
-        String::new()
+        styled.to_string()
     }
 }
 
-fn esc_reset(style: Style, color: bool) -> String {
-    if color {
-        style.render_reset().to_string()
+fn exit_with(error: &clap::Error, stdout_color: bool, stderr_color: bool) -> ! {
+    // Writing directly ignores a closed pipe, which print! would turn into a panic.
+    let _ = if error.use_stderr() {
+        std::io::stderr().write_all(rendered(error, stderr_color).as_bytes())
     } else {
-        String::new()
-    }
+        std::io::stdout().write_all(rendered(error, stdout_color).as_bytes())
+    };
+    process::exit(error.exit_code());
 }
 
-fn title_first_line(text: &str, color: bool) -> String {
-    let title = esc(TITLE, color);
-    let reset = esc_reset(TITLE, color);
+fn title_first_line(text: &str) -> String {
+    let title = TITLE.render();
+    let reset = TITLE.render_reset();
     match text.split_once('\n') {
         Some((first, rest)) => format!("{title}{first}{reset}\n{rest}"),
         None => format!("{title}{text}{reset}"),
@@ -182,10 +192,10 @@ fn split_two_column(content: &str) -> Option<(&str, &str, &str)> {
     None
 }
 
-fn style_help_text(text: &str, color: bool) -> String {
-    let code = esc(CODE, color);
-    let faded = esc(FADED, color);
-    let reset = esc_reset(CODE, color);
+fn style_help_text(text: &str) -> String {
+    let code = CODE.render().to_string();
+    let faded = FADED.render().to_string();
+    let reset = CODE.render_reset().to_string();
     text.split_inclusive('\n')
         .map(|line| {
             let (content, newline) = match line.strip_suffix('\n') {
@@ -214,7 +224,7 @@ fn style_help_text(text: &str, color: bool) -> String {
         .collect()
 }
 
-fn decorate_help(cmd: clap::Command, color: bool) -> clap::Command {
+fn decorate_help(cmd: clap::Command) -> clap::Command {
     let about = cmd.get_about().map(ToString::to_string);
     let long_about = cmd
         .get_long_about()
@@ -223,24 +233,16 @@ fn decorate_help(cmd: clap::Command, color: bool) -> clap::Command {
 
     let footer = format!(
         "{}MIT License 2026 · Clint Valentine{}",
-        esc(FOOTER, color),
-        esc_reset(FOOTER, color),
+        FOOTER.render(),
+        FOOTER.render_reset(),
     );
 
-    let choice = if color {
-        clap::ColorChoice::Always
-    } else {
-        clap::ColorChoice::Never
-    };
-    let mut cmd = cmd.color(choice);
+    let mut cmd = cmd;
     if let Some(about) = about {
-        cmd = cmd.about(title_first_line(&style_help_text(&about, color), color));
+        cmd = cmd.about(title_first_line(&style_help_text(&about)));
     }
     if let Some(long_about) = long_about {
-        cmd = cmd.long_about(title_first_line(
-            &style_help_text(&long_about, color),
-            color,
-        ));
+        cmd = cmd.long_about(title_first_line(&style_help_text(&long_about)));
     }
     cmd = cmd
         .next_line_help(true)
@@ -248,10 +250,10 @@ fn decorate_help(cmd: clap::Command, color: bool) -> clap::Command {
         .after_long_help(footer);
     cmd.mut_args(|mut arg| {
         if let Some(help) = arg.get_help().map(ToString::to_string) {
-            arg = arg.help(style_help_text(&help, color));
+            arg = arg.help(style_help_text(&help));
         }
         if let Some(long_help) = arg.get_long_help().map(ToString::to_string) {
-            arg = arg.long_help(style_help_text(&long_help, color));
+            arg = arg.long_help(style_help_text(&long_help));
         }
         arg
     })
@@ -259,11 +261,13 @@ fn decorate_help(cmd: clap::Command, color: bool) -> clap::Command {
 
 #[cfg(not(tarpaulin_include))]
 fn main() -> Result<(), Error> {
-    let color = std::env::var_os("NO_COLOR").is_none();
+    let no_color = std::env::var_os("NO_COLOR");
+    let stdout_color = wants_color(no_color.as_deref(), std::io::stdout().is_terminal());
+    let stderr_color = wants_color(no_color.as_deref(), std::io::stderr().is_terminal());
 
     let env = Env::default().default_filter_or("info");
-    let write_style = if color {
-        env_logger::WriteStyle::Auto
+    let write_style = if stderr_color {
+        env_logger::WriteStyle::Always
     } else {
         env_logger::WriteStyle::Never
     };
@@ -272,9 +276,12 @@ fn main() -> Result<(), Error> {
         .init();
 
     // Help text is hand-wrapped, and clap would count the injected ANSI escapes as width.
-    let mut cmd = decorate_help(Cli::command().term_width(usize::MAX), color);
-    let matches = cmd.get_matches_mut();
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let mut cmd = decorate_help(Cli::command().term_width(usize::MAX));
+    let matches = cmd
+        .try_get_matches_from_mut(std::env::args_os())
+        .unwrap_or_else(|e| exit_with(&e, stdout_color, stderr_color));
+    let cli = Cli::from_arg_matches(&matches)
+        .unwrap_or_else(|e| exit_with(&e, stdout_color, stderr_color));
 
     let config = Config {
         input: cli.input,
@@ -308,6 +315,8 @@ fn main() -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     #[test]
@@ -325,12 +334,48 @@ mod tests {
         assert_eq!(split_two_column("  annatar -o out.h5ad"), None);
     }
 
+    #[rstest]
+    #[case(None, true, true)]
+    #[case(None, false, false)]
+    #[case(Some(""), true, true)]
+    #[case(Some(""), false, false)]
+    #[case(Some("1"), true, false)]
+    #[case(Some("1"), false, false)]
+    #[case(Some("0"), true, false)]
+    #[case(Some("0"), false, false)]
+    fn color_needs_a_terminal_and_no_non_empty_no_color(
+        #[case] no_color: Option<&str>,
+        #[case] is_terminal: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(wants_color(no_color.map(OsStr::new), is_terminal), expected);
+    }
+
     #[test]
-    fn help_text_is_plain_without_color() {
+    fn a_rendered_error_has_escapes_only_when_asked() {
+        let error = decorate_help(Cli::command())
+            .try_get_matches_from(["annatar", "--bogus"])
+            .unwrap_err();
+        assert!(rendered(&error, true).contains('\u{1b}'));
+        assert!(!rendered(&error, false).contains('\u{1b}'));
+    }
+
+    #[test]
+    fn rendered_help_loses_its_painted_escapes_without_color() {
+        let error = decorate_help(Cli::command())
+            .try_get_matches_from(["annatar", "--help"])
+            .unwrap_err();
+        assert!(rendered(&error, true).contains(&*TITLE.render().to_string()));
+        let plain = rendered(&error, false);
+        assert!(!plain.contains('\u{1b}'));
+        assert!(plain.contains("MIT License"));
+    }
+
+    #[test]
+    fn help_text_drops_backticks_and_paints_terms() {
         let text = "Use `CSQ/SYMBOL`.\n  1  one copy\n";
-        assert_eq!(
-            style_help_text(text, false),
-            "Use CSQ/SYMBOL.\n  1  one copy\n"
-        );
+        let painted = style_help_text(text);
+        assert!(!painted.contains('`'));
+        assert!(painted.contains(&format!("{}CSQ/SYMBOL", CODE.render())));
     }
 }

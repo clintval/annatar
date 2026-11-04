@@ -20,6 +20,10 @@ impl CsqIndex {
     }
 }
 
+pub fn is_missing(value: &str) -> bool {
+    value.is_empty() || value == "."
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CsqEntry {
     pub values: Vec<String>,
@@ -28,7 +32,7 @@ pub struct CsqEntry {
 impl CsqEntry {
     pub fn get<'a>(&'a self, index: &CsqIndex, name: &str) -> Option<&'a str> {
         let value = self.values.get(index.position(name)?)?;
-        (!value.is_empty()).then_some(value.as_str())
+        (!is_missing(value)).then_some(value.as_str())
     }
 }
 
@@ -113,6 +117,14 @@ mod tests {
         assert_eq!(entries[0].get(&index, "SYMBOL"), None);
         assert_eq!(entries[1].get(&index, "SYMBOL"), Some("TP53"));
         assert_eq!(entries[1].get(&index, "Gene"), None);
+    }
+
+    #[test]
+    fn a_lone_dot_is_missing_but_a_dot_in_a_list_is_not() {
+        let index = index(&["Allele", "Consequence", "SYMBOL"]);
+        let entries = parse_entries(&raw(&["T|.|.&."]), &index).unwrap();
+        assert_eq!(entries[0].get(&index, "Consequence"), None);
+        assert_eq!(entries[0].get(&index, "SYMBOL"), Some(".&."));
     }
 
     #[test]

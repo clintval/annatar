@@ -1,6 +1,6 @@
-use anyhow::anyhow;
-
 pub const VEP_RELEASE: u32 = 116;
+
+pub const UNRANKED: u8 = 42;
 
 const CONSEQUENCES: [&str; 41] = [
     "transcript_ablation",
@@ -77,20 +77,20 @@ pub fn rank(term: &str) -> Option<u8> {
     u8::try_from(position + 1).ok()
 }
 
-pub fn most_severe(consequence: &str) -> anyhow::Result<(&'static str, u8)> {
-    let ranks = consequence
+pub fn most_severe(consequence: &str) -> (&str, u8) {
+    consequence
         .split('&')
-        .map(|term| {
-            rank(term).ok_or_else(|| {
-                anyhow!("VEP {VEP_RELEASE} does not rank the Consequence term '{term}'")
-            })
-        })
-        .collect::<anyhow::Result<Vec<u8>>>()?;
-    let best = ranks
-        .into_iter()
-        .min()
-        .expect("split yields at least one term");
-    Ok((CONSEQUENCES[usize::from(best) - 1], best))
+        .map(|term| (term, rank(term).unwrap_or(UNRANKED)))
+        .min_by_key(|&(_, rank)| rank)
+        .expect("split yields at least one term")
+}
+
+pub fn vep_major(version_line: &str) -> Option<u32> {
+    let version = version_line.trim_start_matches('"').strip_prefix('v')?;
+    let end = version
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(version.len());
+    version[..end].parse().ok()
 }
 
 pub fn is_coding(term: &str) -> bool {
@@ -131,23 +131,35 @@ mod tests {
 
     #[test]
     fn most_severe_picks_the_lowest_rank() {
-        let (term, rank) = most_severe("intron_variant&splice_region_variant").unwrap();
-        assert_eq!(term, "splice_region_variant");
-        assert_eq!(rank, 16);
-    }
-
-    #[test]
-    fn most_severe_errors_on_an_unranked_term() {
-        let error = most_severe("made_up").unwrap_err();
         assert_eq!(
-            error.to_string(),
-            "VEP 116 does not rank the Consequence term 'made_up'"
+            most_severe("intron_variant&splice_region_variant"),
+            ("splice_region_variant", 16)
         );
     }
 
     #[test]
-    fn most_severe_errors_even_when_another_term_ranks() {
-        assert!(most_severe("missense_variant&made_up").is_err());
+    fn an_unranked_term_sorts_after_every_known_term() {
+        assert_eq!(most_severe("made_up"), ("made_up", UNRANKED));
+        assert_eq!(
+            most_severe("made_up&sequence_variant"),
+            ("sequence_variant", 41)
+        );
+        assert!(CONSEQUENCES.iter().all(|term| rank(term) < Some(UNRANKED)));
+    }
+
+    #[test]
+    fn an_unranked_term_is_neither_coding_nor_lof() {
+        assert!(!is_coding("made_up") && !is_lof("made_up"));
+    }
+
+    #[test]
+    fn the_major_version_comes_from_the_vep_header_value() {
+        assert_eq!(vep_major("\"v116.0\" API=\"v116\" time=\"now\""), Some(116));
+        assert_eq!(vep_major("\"v116\" time=\"now\""), Some(116));
+        assert_eq!(vep_major("\"v115.2\""), Some(115));
+        assert_eq!(vep_major("v99"), Some(99));
+        assert_eq!(vep_major("\"release\""), None);
+        assert_eq!(vep_major("\"v\""), None);
     }
 
     #[test]
