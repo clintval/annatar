@@ -1,4 +1,5 @@
 pub mod alleles;
+pub mod consequence;
 pub mod csq;
 pub mod fields;
 pub mod genotype;
