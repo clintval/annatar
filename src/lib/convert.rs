@@ -21,14 +21,14 @@ use crate::alleles::{is_skipped_alt, vep_alleles};
 use crate::csq::{CsqEntry, CsqIndex, parse_entries};
 use crate::fields::{Exclusions, FieldPlan, FieldSpec, Kind, Section, Shape, plan_fields};
 use crate::genotype::{covered, genotype_code};
-use crate::h5ad::{Output, UnsValue, X_ENCODING, write_h5ad};
+use crate::h5ad::{LAYER_ENCODING, Output, UnsValue, X_ENCODING, write_h5ad};
 use crate::input::{VariantSource, open_variants};
 use crate::matrix::{Cell, SparseBuilder};
 use crate::pick::{
     Genes, Hashed, ManeTable, PickContext, Picked, entries_for_allele, missing_tie_fields, pick,
     read_genes, read_mane_table, worst_panel_impact,
 };
-use crate::var_table::{InfoValue, RecordRow, VarTable};
+use crate::var_table::{InfoValue, RecordRow, VarTable, widen};
 
 const PICK_RULE: &str = "1. Keep the CSQ entries whose Allele is VEP's allele string for this ALT. \
     2. Keep the entries of the genes the variant lies in, preferring the --genes panel; \
@@ -93,6 +93,14 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
         bail!("two fields make the var column {name}");
     }
     warn_about_header(&header, csq.as_ref());
+    if mane.is_some()
+        && csq.as_ref().is_some_and(|index| {
+            index.position("MANE_SELECT").is_some()
+                || index.position("MANE_PLUS_CLINICAL").is_some()
+        })
+    {
+        warn!("--mane-table is ignored: the VCF declares MANE_SELECT or MANE_PLUS_CLINICAL");
+    }
 
     for record in records {
         let record = record?;
@@ -248,6 +256,10 @@ fn provenance(
             "x_encoding",
             X_ENCODING.iter().map(ToString::to_string).collect(),
         ),
+        list(
+            "layer_encoding",
+            LAYER_ENCODING.iter().map(ToString::to_string).collect(),
+        ),
         list("skipped_fields", plan.skipped.clone()),
     ];
     if let Some(genes) = genes {
@@ -302,7 +314,7 @@ fn check_len(section: &str, id: &str, actual: usize, expected: usize) -> anyhow:
 fn info_elements(value: &InfoField) -> Vec<InfoValue> {
     match value {
         InfoField::Integer(n) => vec![InfoValue::Int(Some(i64::from(*n)))],
-        InfoField::Float(x) => vec![InfoValue::Float(Some(f64::from(*x)))],
+        InfoField::Float(x) => vec![InfoValue::Float(Some(widen(*x)))],
         InfoField::Flag => vec![InfoValue::Flag(true)],
         InfoField::Character(c) => vec![InfoValue::Text(Some(c.to_string()))],
         InfoField::String(s) => vec![InfoValue::Text(Some(s.clone()))],
@@ -312,7 +324,7 @@ fn info_elements(value: &InfoField) -> Vec<InfoValue> {
             .collect(),
         InfoField::Array(InfoArray::Float(values)) => values
             .iter()
-            .map(|x| InfoValue::Float(x.map(f64::from)))
+            .map(|x| InfoValue::Float(x.map(widen)))
             .collect(),
         InfoField::Array(InfoArray::Character(values)) => values
             .iter()

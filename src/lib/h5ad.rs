@@ -26,6 +26,12 @@ pub const X_ENCODING: [&str; 4] = [
     "3: two or more copies of this ALT",
 ];
 
+pub const LAYER_ENCODING: [&str; 3] = [
+    "not stored: cell not covered, or an integer value missing at a covered cell",
+    "0: a measured zero",
+    "NaN: a float value missing at a covered cell",
+];
+
 pub struct Output {
     pub obs_names: Vec<String>,
     pub obs: DataFrame,

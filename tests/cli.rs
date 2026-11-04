@@ -85,6 +85,29 @@ fn threads_read_a_bgzipped_input() {
 }
 
 #[test]
+fn plain_gzip_input_is_refused_with_advice() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("plain.vcf.gz");
+    let mut encoder = flate2::write::GzEncoder::new(
+        fs::File::create(&input).unwrap(),
+        flate2::Compression::default(),
+    );
+    std::io::Write::write_all(&mut encoder, &fs::read(data("basic.vcf")).unwrap()).unwrap();
+    encoder.finish().unwrap();
+    let output = output_in(&dir);
+    annatar()
+        .arg("--output")
+        .arg(&output)
+        .arg(&input)
+        .assert()
+        .failure()
+        .stderr(contains(
+            "plain.vcf.gz is gzip but not BGZF; recompress it with bgzip",
+        ));
+    assert!(!output.exists());
+}
+
+#[test]
 fn no_records_writes_empty_matrix() {
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
@@ -216,6 +239,11 @@ fn symbolic_alts_are_skipped() {
 #[case("bad-info-value.vcf", "chr1:100", "invalid digit")]
 #[case("bad-format-value.vcf", "chr1:100", "invalid digit")]
 #[case("duplicate-sample.vcf", "", "sample c1 appears more than once")]
+#[case(
+    "duplicate-variant.vcf",
+    "chr1:100",
+    "variant chr1:100:A:G appears more than once"
+)]
 #[case(
     "info-number-a-length.vcf",
     "chr1:100",
@@ -453,6 +481,20 @@ fn records_with_no_alt_warn_once() {
         .success()
         .stderr(contains("records with no ALT skipped: 1").count(1));
     assert_eq!(open(&output).n_vars(), 1);
+}
+
+#[test]
+fn a_mane_table_is_ignored_with_a_warning_when_the_header_declares_mane_fields() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg("-o")
+        .arg(output_in(&dir))
+        .arg("--mane-table")
+        .arg(data("mane-summary.txt"))
+        .arg(data("basic.vcf"))
+        .assert()
+        .success()
+        .stderr(contains("--mane-table is ignored").count(1));
 }
 
 #[test]

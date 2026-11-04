@@ -8,6 +8,10 @@ pub enum TextColumn {
 pub fn type_column(values: Vec<Option<String>>) -> TextColumn {
     let parts: Vec<Vec<&str>> = values.iter().map(|v| present_parts(v.as_deref())).collect();
 
+    if parts.iter().all(Vec::is_empty) {
+        return TextColumn::Text(vec![None; parts.len()]);
+    }
+
     let numbers: Option<Vec<f64>> = parts
         .iter()
         .map(|parts| {
@@ -98,10 +102,9 @@ mod tests {
     }
 
     #[test]
-    fn a_column_without_values_is_all_nan_floats() {
-        let values = floats(type_column(some(&[None, Some("."), Some("")])));
-        assert_eq!(values.len(), 3);
-        assert!(values.iter().all(|v| v.is_nan()));
+    fn a_column_without_values_is_an_empty_categorical() {
+        let column = type_column(some(&[None, Some("."), Some("")]));
+        assert_eq!(column, TextColumn::Text(vec![None, None, None]));
     }
 
     #[test]

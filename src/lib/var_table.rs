@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use anyhow::bail;
+
 use polars::prelude::{Categories, Column, DataFrame, DataType, NamedFrom, Series};
 
 use crate::alleles::variant_name;
@@ -91,6 +93,12 @@ impl InfoColumn {
     }
 }
 
+pub fn widen(value: f32) -> f64 {
+    format!("{value}")
+        .parse()
+        .unwrap_or_else(|_| f64::from(value))
+}
+
 fn categorical(name: &str, values: Vec<Option<String>>) -> anyhow::Result<Column> {
     Ok(Series::new(name.into(), values)
         .cast(&DataType::from_categories(Categories::global()))?
@@ -100,9 +108,11 @@ fn categorical(name: &str, values: Vec<Option<String>>) -> anyhow::Result<Column
 pub struct VarTable {
     csq: Option<CsqIndex>,
     csq_columns: Vec<(String, Vec<Option<String>>)>,
+    csq_positions: Vec<usize>,
     with_genes: bool,
     info: Vec<(String, InfoColumn)>,
     names: Vec<String>,
+    seen: HashSet<String>,
     chrom: Vec<Option<String>>,
     pos: Vec<Option<i64>>,
     reference: Vec<Option<String>>,
@@ -128,14 +138,15 @@ impl VarTable {
         exclusions: &Exclusions,
         with_genes: bool,
     ) -> Self {
-        let csq_names: Vec<String> = csq
+        let (csq_positions, csq_names): (Vec<usize>, Vec<String>) = csq
             .map(|index| {
                 index
                     .names
                     .iter()
-                    .filter(|name| !exclusions.contains(Section::Csq, name))
-                    .cloned()
-                    .collect()
+                    .enumerate()
+                    .filter(|(_, name)| !exclusions.contains(Section::Csq, name))
+                    .map(|(position, name)| (position, name.clone()))
+                    .unzip()
             })
             .unwrap_or_default();
 
@@ -158,9 +169,11 @@ impl VarTable {
         Self {
             csq: csq.cloned(),
             csq_columns: csq_names.into_iter().map(|n| (n, Vec::new())).collect(),
+            csq_positions,
             with_genes,
             info,
             names: Vec::new(),
+            seen: HashSet::new(),
             chrom: Vec::new(),
             pos: Vec::new(),
             reference: Vec::new(),
@@ -200,6 +213,10 @@ impl VarTable {
             }
             None => (None, false, false),
         };
+        let name = variant_name(&row.chrom, row.pos, &row.reference, &row.alt);
+        if self.seen.contains(&name) {
+            bail!("variant {name} appears more than once");
+        }
         let pos = i64::try_from(row.pos)?;
         let ref_reads = i64::try_from(row.ref_reads)?;
         let alt_reads = i64::try_from(row.alt_reads)?;
@@ -207,21 +224,22 @@ impl VarTable {
         for (column, value) in self.info.iter_mut().zip(info) {
             column.1.push(value);
         }
-        for (name, values) in &mut self.csq_columns {
+        for ((_, values), position) in self.csq_columns.iter_mut().zip(&self.csq_positions) {
             let value = picked
-                .zip(self.csq.as_ref())
-                .and_then(|((entry, _), index)| entry.get(index, name).map(str::to_string));
+                .and_then(|(entry, _)| entry.values.get(*position))
+                .filter(|value| !value.is_empty())
+                .cloned();
             values.push(value);
         }
 
-        self.names
-            .push(variant_name(&row.chrom, row.pos, &row.reference, &row.alt));
+        self.seen.insert(name.clone());
+        self.names.push(name);
         self.chrom.push(Some(row.chrom));
         self.pos.push(Some(pos));
         self.reference.push(Some(row.reference));
         self.alt.push(Some(row.alt));
         self.id.push(row.id);
-        self.qual.push(row.qual.map_or(f64::NAN, f64::from));
+        self.qual.push(row.qual.map_or(f64::NAN, widen));
         self.filter.push(row.filter);
         self.n_cells_covered
             .push(Some(i64::from(row.n_cells_covered)));
@@ -624,8 +642,59 @@ mod tests {
         for name in ["consequence_rank", "pick_tier"] {
             assert_eq!(df.column(name).unwrap().null_count(), 1, "{name}");
         }
-        let symbol = df.column("SYMBOL").unwrap().f64().unwrap();
-        assert!(symbol.get(0).unwrap().is_nan());
+        let symbol = df.column("SYMBOL").unwrap();
+        assert!(is_categorical(symbol));
+        assert_eq!(symbol.null_count(), 1);
+    }
+
+    #[test]
+    fn a_duplicate_variant_is_refused_and_leaves_columns_aligned() {
+        let info = [spec("DP", Shape::Scalar, Kind::Integer)];
+        let csq = index(&["Consequence", "SYMBOL"]);
+        let mut table = VarTable::new(&info, Some(&csq), &Exclusions::default(), true);
+        let pick = entry(&["missense_variant", "TP53"]);
+        let tier = Some((&pick, Tier::Canonical));
+        table
+            .push(
+                row(100, "T"),
+                vec![InfoValue::Int(Some(1))],
+                tier,
+                Some("HIGH"),
+            )
+            .unwrap();
+        let error = table
+            .push(
+                row(100, "T"),
+                vec![InfoValue::Int(Some(2))],
+                tier,
+                Some("HIGH"),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "variant chr1:100:A:T appears more than once"
+        );
+        table
+            .push(
+                row(101, "T"),
+                vec![InfoValue::Int(Some(3))],
+                tier,
+                Some("HIGH"),
+            )
+            .unwrap();
+        let (names, df) = table.finish().unwrap();
+        assert_eq!(names.len(), 2);
+        assert_eq!(df.height(), 2);
+        assert!(df.columns().iter().all(|c| c.len() == 2));
+    }
+
+    #[test]
+    fn f32_values_widen_through_their_shortest_decimal_form() {
+        assert_eq!(widen(30.1), 30.1);
+        assert_eq!(widen(0.1), 0.1);
+        assert!(widen(f32::NAN).is_nan());
+        assert_eq!(widen(f32::INFINITY), f64::INFINITY);
+        assert_eq!(widen(f32::NEG_INFINITY), f64::NEG_INFINITY);
     }
 
     #[test]
@@ -675,6 +744,7 @@ mod tests {
         assert_eq!(names.len(), 0);
         assert_eq!(df.height(), 0);
         assert_eq!(df.width(), 11 + 1 + 5 + 1);
+        assert!(is_categorical(df.column("SYMBOL").unwrap()));
         write(names, df).unwrap();
     }
 
@@ -690,7 +760,14 @@ mod tests {
             .push(row(2, "G"), vec![InfoValue::Text(None)], None, None)
             .unwrap();
         let (names, df) = table.finish().unwrap();
-        for name in ["id", "filter", "pick_tier", "worst_panel_impact", "NOTE"] {
+        for name in [
+            "id",
+            "filter",
+            "pick_tier",
+            "worst_panel_impact",
+            "NOTE",
+            "SYMBOL",
+        ] {
             assert_eq!(df.column(name).unwrap().null_count(), 2, "{name}");
         }
         write(names, df).unwrap();

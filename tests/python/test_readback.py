@@ -269,6 +269,11 @@ def test_uns_records_provenance(tmp_path):
     assert a.uns["csq_fields"][0] == "Allele" and len(a.uns["csq_fields"]) == 19
     assert "MANE Select" in a.uns["pick_rule"]
     assert list(a.uns["x_encoding"])[1].startswith("1:")
+    assert list(a.uns["layer_encoding"]) == [
+        "not stored: cell not covered, or an integer value missing at a covered cell",
+        "0: a measured zero",
+        "NaN: a float value missing at a covered cell",
+    ]
     assert list(a.uns["skipped_fields"]) == []
 
 
@@ -389,3 +394,28 @@ def test_large_output_reads_without_a_hdf5_plugin(tmp_path, monkeypatch):
     layer = adata.layers["AD_alt"].toarray()
     for (i, j), value in list(alt.items())[::97]:
         assert layer[i, j] == value
+
+
+def test_floats_read_back_exactly_and_an_unvalued_csq_subfield_is_categorical(tmp_path):
+    lines = [
+        "##fileformat=VCFv4.3",
+        "##contig=<ID=chr1,length=1000000>",
+        '##INFO=<ID=SCORE,Number=A,Type=Float,Description="A score">',
+        '##INFO=<ID=CSQ,Number=.,Type=String,Description="VEP. Format: Allele|Consequence|SYMBOL|Note">',
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+        '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">',
+        "\t".join(["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT", "c1"]),
+        "\t".join(
+            ["chr1", "100", ".", "A", "G", "30.1", "PASS", "SCORE=0.1;CSQ=G|missense_variant|TP53|", "GT:AD", "0/1:5,3"]
+        ),
+    ]
+    vcf = tmp_path / "floats.vcf"
+    vcf.write_text("\n".join(lines) + "\n")
+    output = tmp_path / "floats.h5ad"
+    subprocess.run([BINARY, "--output", output, vcf], check=True, capture_output=True)
+    a = read(output)
+    assert a.var["qual"].iloc[0] == 30.1
+    assert a.var["SCORE"].iloc[0] == 0.1
+    assert isinstance(a.var["Note"].dtype, pd.CategoricalDtype)
+    assert a.var["Note"].isna().all()
+    assert not a.var["Note"].str.contains("x").any()

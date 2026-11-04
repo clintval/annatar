@@ -88,9 +88,13 @@ impl SparseBuilder {
         }
     }
 
+    /// `rows` must be sorted and unique.
+    ///
     /// # Panics
-    /// Panics if `cells` does not match the layers, or a cell's kind differs from its layer's.
+    /// Panics if `x` is not as long as `rows`, `cells` does not match the layers, or a cell's
+    /// kind differs from its layer's.
     pub fn push_column(&mut self, rows: &[u32], x: &[Option<i8>], cells: &[Vec<Cell>]) {
+        assert_eq!(x.len(), rows.len(), "one X code per row");
         assert_eq!(cells.len(), self.layers.len(), "one cell vector per layer");
         for (&row, code) in rows.iter().zip(x) {
             if let Some(code) = code {
@@ -174,6 +178,17 @@ mod tests {
         assert_eq!(csr_entry(ad, 1, 0), None);
         assert_eq!(m.x.nnz(), 2);
         assert_eq!(m.missing.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "one X code per row")]
+    fn x_codes_must_match_rows() {
+        let mut b = SparseBuilder::new(3, &int_layers());
+        b.push_column(
+            &[0, 2],
+            &[Some(1)],
+            &[vec![Cell::Int(None), Cell::Int(None)]],
+        );
     }
 
     #[test]

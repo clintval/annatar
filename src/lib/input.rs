@@ -33,6 +33,14 @@ pub fn open_variants(path: &Path, threads: NonZeroUsize) -> anyhow::Result<Varia
     let mut raw = BufReader::new(raw);
 
     let mut inner: Box<dyn BufRead + Send> = if raw.fill_buf()?.starts_with(&GZIP_MAGIC) {
+        if !is_bgzf(raw.fill_buf()?) {
+            let name = if path == Path::new("-") {
+                "stdin".to_string()
+            } else {
+                path.display().to_string()
+            };
+            bail!("{name} is gzip but not BGZF; recompress it with bgzip");
+        }
         let decoder = bgzf::io::MultithreadedReader::with_worker_count(threads, raw);
         Box::new(BufReader::new(decoder))
     } else {
@@ -76,6 +84,26 @@ pub fn open_variants(path: &Path, threads: NonZeroUsize) -> anyhow::Result<Varia
             records: Box::new(records),
         })
     }
+}
+
+fn is_bgzf(head: &[u8]) -> bool {
+    const FEXTRA: u8 = 0x04;
+    if head.len() < 12 {
+        return true;
+    }
+    if head[3] & FEXTRA == 0 {
+        return false;
+    }
+    let extra_end = (12 + usize::from(u16::from_le_bytes([head[10], head[11]]))).min(head.len());
+    let mut extra = &head[12..extra_end];
+    while extra.len() >= 4 {
+        if extra.starts_with(b"BC") {
+            return true;
+        }
+        let len = usize::from(u16::from_le_bytes([extra[2], extra[3]]));
+        extra = extra.get(4 + len..).unwrap_or_default();
+    }
+    false
 }
 
 fn position(start: Option<io::Result<noodles::core::Position>>) -> io::Result<usize> {
