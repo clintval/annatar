@@ -1,0 +1,11 @@
+##fileformat=VCFv4.3
+##contig=<ID=chr1,length=248956422>
+##contig=<ID=chr17,length=83257441>
+##FILTER=<ID=PASS,Description="All filters passed">
+##FILTER=<ID=LowQual,Description="Low quality">
+##INFO=<ID=CSQ,Number=.,Type=String,Description="Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE|HGVSc|HGVSp|CANONICAL|MANE_SELECT|MANE_PLUS_CLINICAL|CCDS|SWISSPROT|Protein_position|ClinVar_CLNSIG|ClinVar_CLNDN|REVEL_score">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	12345	.	A	G	50	PASS	CSQ=G|intron_variant|MODIFIER|GENE1|ENSG1|Transcript|ENST1|protein_coding|||YES||||||||,G|upstream_gene_variant|MODIFIER|GENE2|ENSG2|Transcript|ENST2|protein_coding|||YES||||||||
