@@ -26,7 +26,7 @@ The h5ad can sit next to other single-cell modalities in a `MuData` keyed on cel
 Convert a VCF of cells:
 
 ```bash
-bcftools view 'cells.vcf.gz' | annatar --output 'cells.h5ad'
+annatar 'cells.vcf.gz' 'cells.h5ad'
 ```
 
 For a VEP-annotated VCF, prefer panel genes and leave out CSQ subfields:
@@ -36,8 +36,8 @@ annatar \
     --genes 'panel-genes.txt' \
     --exclude-field 'INFO/CSQ/Existing_variation' \
     --exclude-field 'INFO/CSQ/SOMATIC' \
-    --output 'cells.h5ad' \
-    'cells.vep.vcf.gz'
+    'cells.vep.vcf.gz' \
+    'cells.h5ad'
 ```
 
 Excluding `INFO/CSQ` drops all annotation. The fields `FORMAT/AD` and `FORMAT/GT` cannot be excluded.
@@ -46,22 +46,21 @@ Excluding `INFO/CSQ` drops all annotation. The fields `FORMAT/AD` and `FORMAT/GT
 
 | Slot | Contents |
 | --- | --- |
-| `X` | Genotype of each cell at each variant |
+| `X` | Copies of each ALT in each cell's called genotype |
 | `layers` | Numeric FORMAT fields, such as `AD_ref`, `AD_alt` and `DP` |
 | `obs` | Per-cell counts, `n_sites_covered` and `n_sites_alt` |
 | `var` | One row per ALT allele, named `chrom:pos:ref:alt` |
-| `uns` | Provenance and the encodings used in the file |
+| `uns` | Provenance and the encoding of `X` |
 
 ### Genotypes
 
-| Value in `X` | Meaning |
-| --- | --- |
-| not stored | no genotype |
-| 1 | no copies of this ALT |
-| 2 | one copy of this ALT |
-| 3 | two or more copies of this ALT |
+`X` holds the number of copies of the ALT in the called genotype, so `0/1` is 1 and `1/1` is 2, and hom-ref and uncalled cells are not stored.
+So `X > 0` means a called carrier and `X.sum()` counts ALT haplotypes.
+A haploid ALT call is 1, so `X == 2` does not find it.
 
-In a layer, a stored `0` is a measured zero and an unstored entry means no data.
+Layers are read counts, with zeros and missing values not stored.
+At a variant a cell is a carrier (`X > 0`, or `AD_alt > 0` for reads), reference (`AD_ref > 0` with no `X` or `AD_alt`), or has no data.
+A cell with reads but no call keeps them in the layers, and `AD_alt` counts alt reads in cells called `0/0`.
 
 ### Variants
 
@@ -86,7 +85,10 @@ Column types are fixed for VEP 116, so a column has the same type in every file.
 Other VEP versions run with a warning.
 
 Split multiallelic records before running VEP, not after.
-Pass `--allele_number` to VEP if you use `--minimal`.
+annatar stops on evidence of a split after VEP, including a `bcftools norm` split line in the header, even if no record changed.
+It cannot detect a split after `--pick` when neither `--allele_number` nor that header line is there.
+annatar refuses `--minimal` output, so run VEP without it.
+Pass `--allele_number` to VEP so symbolic ALTs and breakends match by position.
 
 ## Merging Libraries
 
@@ -103,10 +105,8 @@ var = pd.concat([library.var for library in libraries.values()])
 adata.var = var[~var.index.duplicated()].reindex(adata.var_names)
 ```
 
-After merging, two things change.
-
-- Read counts in `var`, such as `alt_reads`, describe the first file with that variant.
-- Layers lose their stored zeros if the files hold different variants, so an unstored `AD_alt` no longer means an uncovered cell.
+After merging, read counts in `var`, such as `alt_reads`, describe the first file with that variant.
+`X` and the layers keep every stored value, since neither stores a zero.
 
 ## MuData Example
 
@@ -119,10 +119,7 @@ import mudata as md
 import muon
 import numpy as np
 
-mu = md.MuData({
-    'atac': ad.read_h5ad('cells.atac.h5ad'),
-    'variants': ad.read_h5ad('cells.h5ad'),
-})
+mu = md.MuData({'atac': ad.read_h5ad('cells.atac.h5ad'), 'variants': ad.read_h5ad('cells.h5ad')})
 
 variants = mu['variants']
 pathogenic = {'Pathogenic', 'Likely_pathogenic', 'Pathogenic/Likely_pathogenic'}
