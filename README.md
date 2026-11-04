@@ -29,7 +29,7 @@ Convert a VCF of cells:
 annatar --output 'cells.h5ad' 'cells.vcf.gz'
 ```
 
-For a VEP-annotated VCF, prefer the transcripts of a panel of genes, one HGNC symbol or Ensembl gene ID per line, and leave out CSQ subfields that are not needed:
+For a VEP-annotated VCF, prefer panel genes and leave out CSQ subfields:
 
 ```bash
 annatar \
