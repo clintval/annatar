@@ -1,0 +1,14 @@
+##fileformat=VCFv4.3
+##contig=<ID=chr1,length=248956422>
+##FILTER=<ID=PASS,Description="All filters passed">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Raw read depth">
+##INFO=<ID=AC,Number=A,Type=Integer,Description="Allele count">
+##INFO=<ID=SCORE,Number=1,Type=Float,Description="A score">
+##INFO=<ID=NOTE,Number=1,Type=String,Description="A note">
+##INFO=<ID=SOLO,Number=0,Type=Flag,Description="A flag">
+##INFO=<ID=CSQ,Number=.,Type=String,Description="Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature|CANONICAL|STRAND|DISTANCE|REVEL_score">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	c1	c2
+chr1	100	rs1	A	G	50	PASS	DP=8;AC=1;SCORE=0.5;NOTE=x;SOLO;CSQ=G|missense_variant|MODERATE|GENE1|ENSG1|ENST1|YES|1|10|0.9	GT:AD	0/1:5,3	0/0:7,0
+chr1	200	rs2	C	T	60	PASS	DP=9;AC=2;SCORE=0.6;NOTE=y;SOLO;CSQ=T|stop_gained|HIGH|GENE1|ENSG1|ENST1|YES|-1|20|0.1	GT:AD	0/1:5,3	0/0:7,0

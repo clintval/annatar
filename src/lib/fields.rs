@@ -1,0 +1,365 @@
+use std::collections::HashSet;
+use std::str::FromStr;
+
+use noodles::vcf::Header;
+use noodles::vcf::header::record::value::map::{format, info};
+
+use crate::csq::CsqIndex;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Section {
+    Info,
+    Format,
+    Csq,
+}
+
+impl Section {
+    fn as_str(self) -> &'static str {
+        match self {
+            Section::Info => "INFO",
+            Section::Format => "FORMAT",
+            Section::Csq => "INFO/CSQ",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exclusion {
+    pub section: Section,
+    pub id: String,
+}
+
+impl FromStr for Exclusion {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let invalid = || "expected INFO/ID, FORMAT/ID or INFO/CSQ/subfield".to_string();
+        let (prefix, id) = s.split_once('/').ok_or_else(invalid)?;
+        let (section, id) = match (prefix, id.strip_prefix("CSQ/")) {
+            ("INFO", Some(subfield)) => (Section::Csq, subfield),
+            ("INFO", None) => (Section::Info, id),
+            ("FORMAT", _) => (Section::Format, id),
+            _ => return Err(invalid()),
+        };
+        if id.is_empty() {
+            return Err(invalid());
+        }
+        Ok(Self {
+            section,
+            id: id.to_string(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Exclusions(HashSet<(Section, String)>);
+
+impl Exclusions {
+    pub fn new(items: Vec<Exclusion>) -> Self {
+        Self(items.into_iter().map(|e| (e.section, e.id)).collect())
+    }
+
+    pub fn contains(&self, section: Section, id: &str) -> bool {
+        self.0.contains(&(section, id.to_string()))
+    }
+
+    fn sorted_names(&self, keep: impl Fn(Section, &str) -> bool) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .0
+            .iter()
+            .filter(|(section, id)| keep(*section, id))
+            .map(|(section, id)| format!("{}/{id}", section.as_str()))
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    pub fn undeclared(&self, header: &Header, csq: Option<&CsqIndex>) -> Vec<String> {
+        self.sorted_names(|section, id| match section {
+            Section::Info => id != "CSQ" && !header.infos().contains_key(id),
+            Section::Format => !header.formats().contains_key(id),
+            Section::Csq => csq.is_some_and(|index| index.position(id).is_none()),
+        })
+    }
+
+    pub fn without_csq_to_act_on(&self, header: &Header) -> Vec<String> {
+        self.sorted_names(|section, id| match section {
+            Section::Info => id == "CSQ" && !header.infos().contains_key(id),
+            Section::Format => false,
+            Section::Csq => true,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    Scalar,
+    PerAlt,
+    RefAlt,
+    Fixed(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Integer,
+    Float,
+    Flag,
+    Text,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldSpec {
+    pub id: String,
+    pub shape: Shape,
+    pub kind: Kind,
+}
+
+impl FieldSpec {
+    pub fn column_names(&self) -> Vec<String> {
+        match self.shape {
+            Shape::Scalar | Shape::PerAlt => vec![self.id.clone()],
+            Shape::RefAlt => vec![format!("{}_ref", self.id), format!("{}_alt", self.id)],
+            Shape::Fixed(n) => (1..=n).map(|i| format!("{}_{i}", self.id)).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FieldPlan {
+    pub info: Vec<FieldSpec>,
+    pub format: Vec<FieldSpec>,
+    pub skipped: Vec<String>,
+}
+
+fn info_shape(number: info::Number) -> Option<Shape> {
+    match number {
+        info::Number::Count(0 | 1) => Some(Shape::Scalar),
+        info::Number::Count(n) => Some(Shape::Fixed(n)),
+        info::Number::AlternateBases => Some(Shape::PerAlt),
+        info::Number::ReferenceAlternateBases => Some(Shape::RefAlt),
+        _ => None,
+    }
+}
+
+fn format_shape(number: format::Number) -> Option<Shape> {
+    match number {
+        format::Number::Count(0 | 1) => Some(Shape::Scalar),
+        format::Number::Count(n) => Some(Shape::Fixed(n)),
+        format::Number::AlternateBases => Some(Shape::PerAlt),
+        format::Number::ReferenceAlternateBases => Some(Shape::RefAlt),
+        _ => None,
+    }
+}
+
+fn info_kind(ty: info::Type) -> Kind {
+    match ty {
+        info::Type::Integer => Kind::Integer,
+        info::Type::Float => Kind::Float,
+        info::Type::Flag => Kind::Flag,
+        info::Type::Character | info::Type::String => Kind::Text,
+    }
+}
+
+fn format_kind(ty: format::Type) -> Kind {
+    match ty {
+        format::Type::Integer => Kind::Integer,
+        format::Type::Float => Kind::Float,
+        format::Type::Character | format::Type::String => Kind::Text,
+    }
+}
+
+pub fn plan_fields(header: &Header, exclusions: &Exclusions) -> FieldPlan {
+    let mut plan = FieldPlan::default();
+
+    for (id, map) in header.infos() {
+        if id == "CSQ" || exclusions.contains(Section::Info, id) {
+            continue;
+        }
+        match info_shape(map.number()) {
+            Some(shape) => plan.info.push(FieldSpec {
+                id: id.clone(),
+                shape,
+                kind: info_kind(map.ty()),
+            }),
+            None => plan.skipped.push(format!("INFO/{id}")),
+        }
+    }
+
+    for (id, map) in header.formats() {
+        if id == "GT" || exclusions.contains(Section::Format, id) {
+            continue;
+        }
+        let kind = format_kind(map.ty());
+        match format_shape(map.number()) {
+            Some(shape) if kind != Kind::Text => plan.format.push(FieldSpec {
+                id: id.clone(),
+                shape,
+                kind,
+            }),
+            _ => plan.skipped.push(format!("FORMAT/{id}")),
+        }
+    }
+
+    plan
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+    use std::path::PathBuf;
+
+    use crate::input::open_variants;
+
+    use rstest::rstest;
+
+    use super::*;
+
+    fn exclusions(items: &[&str]) -> Exclusions {
+        Exclusions::new(items.iter().map(|s| s.parse().unwrap()).collect())
+    }
+
+    fn header_of(name: &str) -> Header {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(name);
+        open_variants(&path, NonZeroUsize::new(1).unwrap())
+            .unwrap()
+            .header
+    }
+
+    #[test]
+    fn undeclared_exclusions_match_exactly_and_sort() {
+        let header = header_of("basic.vcf");
+        let csq = CsqIndex::from_header(&header);
+        let items = exclusions(&[
+            "INFO/Z",
+            "INFO/CSQ/symbol",
+            "INFO/CSQ/SYMBOL",
+            "FORMAT/DP",
+            "FORMAT/dp",
+        ]);
+        assert_eq!(
+            items.undeclared(&header, csq.as_ref()),
+            ["FORMAT/dp", "INFO/CSQ/symbol", "INFO/Z"]
+        );
+    }
+
+    #[test]
+    fn annotation_exclusions_are_not_undeclared_without_csq() {
+        let header = header_of("no-csq.vcf");
+        let items = exclusions(&["INFO/CSQ/SYMBOL", "INFO/CSQ", "INFO/Z"]);
+        assert_eq!(items.undeclared(&header, None), ["INFO/Z"]);
+        assert_eq!(
+            items.without_csq_to_act_on(&header),
+            ["INFO/CSQ", "INFO/CSQ/SYMBOL"]
+        );
+    }
+
+    #[test]
+    fn info_csq_has_something_to_act_on_when_the_header_declares_it() {
+        let header = header_of("basic.vcf");
+        let items = exclusions(&["INFO/CSQ"]);
+        assert_eq!(items.without_csq_to_act_on(&header).len(), 0);
+    }
+
+    fn bcftools_plan(exclusions: &[&str]) -> FieldPlan {
+        plan_for("bcftools-1.24.vcf", exclusions)
+    }
+
+    fn plan_for(name: &str, exclusions: &[&str]) -> FieldPlan {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(name);
+        let source = open_variants(&path, NonZeroUsize::new(1).unwrap()).unwrap();
+        let items = exclusions.iter().map(|s| s.parse().unwrap()).collect();
+        plan_fields(&source.header, &Exclusions::new(items))
+    }
+
+    fn columns(specs: &[FieldSpec]) -> Vec<String> {
+        specs.iter().flat_map(FieldSpec::column_names).collect()
+    }
+
+    #[test]
+    fn info_columns_follow_header_order_and_expand() {
+        let plan = bcftools_plan(&[]);
+        assert_eq!(
+            columns(&plan.info),
+            [
+                "INDEL", "IDV", "IMF", "DP", "VDB", "RPBZ", "MQBZ", "BQBZ", "MQSBZ", "SCBZ", "SGB",
+                "MQ0F", "AC", "AN", "DP4_1", "DP4_2", "DP4_3", "DP4_4", "MQ"
+            ]
+        );
+    }
+
+    #[test]
+    fn format_columns_split_ref_and_alt_and_skip_pl() {
+        let plan = bcftools_plan(&[]);
+        assert_eq!(columns(&plan.format), ["DP", "AD_ref", "AD_alt"]);
+        assert_eq!(plan.skipped, ["FORMAT/PL"]);
+    }
+
+    #[test]
+    fn genotype_is_neither_a_layer_nor_listed() {
+        let plan = bcftools_plan(&[]);
+        assert!(plan.format.iter().all(|spec| spec.id != "GT"));
+        assert!(!plan.skipped.iter().any(|s| s.ends_with("/GT")));
+    }
+
+    #[test]
+    fn excluded_format_field_is_absent_and_not_skipped() {
+        let plan = bcftools_plan(&["FORMAT/DP", "FORMAT/PL"]);
+        assert_eq!(columns(&plan.format), ["AD_ref", "AD_alt"]);
+        assert_eq!(plan.skipped, Vec::<String>::new());
+    }
+
+    #[test]
+    fn excluded_info_field_is_absent() {
+        let plan = bcftools_plan(&["INFO/MQ"]);
+        assert_eq!(plan.skipped, bcftools_plan(&[]).skipped);
+        assert!(!columns(&plan.info).contains(&"MQ".to_string()));
+    }
+
+    #[test]
+    fn field_shapes_cover_every_skip_and_kind() {
+        let plan = plan_for("field-shapes.vcf", &[]);
+        assert_eq!(columns(&plan.info), ["NOTE"]);
+        assert_eq!(plan.info[0].kind, Kind::Text);
+        assert_eq!(
+            columns(&plan.format),
+            ["AD_ref", "AD_alt", "PAIR_1", "PAIR_2"]
+        );
+        assert_eq!(plan.skipped, ["INFO/GL", "INFO/VAR", "FORMAT/FT"]);
+    }
+
+    #[test]
+    fn exclusion_parses_section_and_id() {
+        let parsed: Exclusion = "INFO/CSQ/COSMIC".parse().unwrap();
+        assert_eq!(parsed.section, Section::Csq);
+        assert_eq!(parsed.id, "COSMIC");
+    }
+
+    #[rstest]
+    #[case("COSMIC")]
+    #[case("CSQ/COSMIC")]
+    #[case("INFO/")]
+    #[case("INFO/CSQ/")]
+    #[case("FORMAT/")]
+    fn exclusion_outside_the_grammar_is_rejected(#[case] name: &str) {
+        let error = name.parse::<Exclusion>().unwrap_err();
+        assert_eq!(error, "expected INFO/ID, FORMAT/ID or INFO/CSQ/subfield");
+    }
+
+    #[test]
+    fn the_whole_of_csq_is_an_info_field() {
+        let parsed: Exclusion = "INFO/CSQ".parse().unwrap();
+        assert_eq!(parsed.section, Section::Info);
+        assert_eq!(parsed.id, "CSQ");
+    }
+
+    #[test]
+    fn exclusions_match_on_section_and_id() {
+        let exclusions = Exclusions::new(vec!["INFO/DP".parse().unwrap()]);
+        assert!(exclusions.contains(Section::Info, "DP"));
+        assert!(!exclusions.contains(Section::Format, "DP"));
+    }
+}

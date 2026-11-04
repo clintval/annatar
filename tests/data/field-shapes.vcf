@@ -1,0 +1,11 @@
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=1000>
+##INFO=<ID=NOTE,Number=1,Type=Character,Description="A single character note">
+##INFO=<ID=GL,Number=G,Type=Float,Description="Per genotype value">
+##INFO=<ID=VAR,Number=.,Type=Integer,Description="Variable length value">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=FT,Number=1,Type=String,Description="Sample filter">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##FORMAT=<ID=PAIR,Number=2,Type=Integer,Description="A pair of counts">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	c1	c2
+chr1	100	.	G	A	.	.	NOTE=x	GT:FT:AD:PAIR	0/1:PASS:1,2:3,4	0/0:PASS:2,0:5,6
