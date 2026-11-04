@@ -3,6 +3,8 @@
 ##contig=<ID=chr17,length=83257441>
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FILTER=<ID=LowQual,Description="Low quality">
+##VEP="v116" time="2026-01-01 00:00:00" cache="/data/vep/homo_sapiens/116_GRCh38" ensembl=116.0 assembly="GRCh38"
+##VEP-command-line='vep --cache --offline --vcf --everything --input_file cells.vcf --output_file cells.vep.vcf'
 ##INFO=<ID=CSQ,Number=.,Type=String,Description="Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE|HGVSc|HGVSp|CANONICAL|MANE_SELECT|MANE_PLUS_CLINICAL|CCDS|SWISSPROT|Protein_position|ClinVar_CLNSIG|ClinVar_CLNDN|REVEL_score">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">

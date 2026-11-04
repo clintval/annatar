@@ -1,0 +1,8 @@
+##fileformat=VCFv4.3
+##contig=<ID=chr1,length=248956422>
+##contig=<ID=chr17,length=83257441>
+##INFO=<ID=CSQ,Number=.,Type=String,Description="Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature|CANONICAL|ClinVar_CLNSIG">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	c1	c2	c3
+chr1	100	.	A	G	50	PASS	CSQ=G|missense_variant|MODERATE|GENE1|ENSG1|ENST1|YES|	AD:DP	5,3:8	7,0:7	.:.

@@ -4,11 +4,23 @@ use std::str::FromStr;
 use noodles::vcf::Header;
 use noodles::vcf::header::record::value::map::{format, info};
 
+use crate::csq::CsqIndex;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Section {
     Info,
     Format,
     Csq,
+}
+
+impl Section {
+    fn as_str(self) -> &'static str {
+        match self {
+            Section::Info => "INFO",
+            Section::Format => "FORMAT",
+            Section::Csq => "CSQ",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +61,21 @@ impl Exclusions {
 
     pub fn contains(&self, section: Section, id: &str) -> bool {
         self.0.contains(&(section, id.to_string()))
+    }
+
+    pub fn undeclared(&self, header: &Header, csq: Option<&CsqIndex>) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .0
+            .iter()
+            .filter(|(section, id)| match section {
+                Section::Info => !header.infos().contains_key(id),
+                Section::Format => !header.formats().contains_key(id),
+                Section::Csq => csq.is_none_or(|index| index.position(id).is_none()),
+            })
+            .map(|(section, id)| format!("{}/{id}", section.as_str()))
+            .collect();
+        names.sort_unstable();
+        names
     }
 }
 
@@ -172,6 +199,45 @@ mod tests {
     use crate::input::open_variants;
 
     use super::*;
+
+    fn exclusions(items: &[&str]) -> Exclusions {
+        Exclusions::new(items.iter().map(|s| s.parse().unwrap()).collect())
+    }
+
+    fn header_of(name: &str) -> Header {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(name);
+        open_variants(&path, NonZeroUsize::new(1).unwrap())
+            .unwrap()
+            .header
+    }
+
+    #[test]
+    fn undeclared_exclusions_match_exactly_and_sort() {
+        let header = header_of("basic.vcf");
+        let csq = CsqIndex::from_header(&header);
+        let items = exclusions(&[
+            "INFO/Z",
+            "CSQ/symbol",
+            "CSQ/SYMBOL",
+            "FORMAT/DP",
+            "FORMAT/dp",
+        ]);
+        assert_eq!(
+            items.undeclared(&header, csq.as_ref()),
+            ["CSQ/symbol", "FORMAT/dp", "INFO/Z"]
+        );
+    }
+
+    #[test]
+    fn csq_exclusions_are_undeclared_without_csq() {
+        let header = header_of("no-csq.vcf");
+        assert_eq!(
+            exclusions(&["CSQ/SYMBOL"]).undeclared(&header, None),
+            ["CSQ/SYMBOL"]
+        );
+    }
 
     fn bcftools_plan(exclusions: &[&str]) -> FieldPlan {
         plan_for("bcftools-1.24.vcf", exclusions)

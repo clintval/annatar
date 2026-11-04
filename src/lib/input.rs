@@ -9,6 +9,7 @@ use noodles::bgzf;
 use noodles::vcf::variant::RecordBuf;
 use noodles::vcf::variant::record_buf::Samples;
 use noodles::vcf::variant::record_buf::info::field::Value as InfoValue;
+use noodles::vcf::variant::record_buf::info::field::value::Array as InfoArray;
 use noodles::vcf::variant::record_buf::samples::sample::Value as SampleValue;
 use noodles::vcf::variant::record_buf::samples::sample::value::Array as SampleArray;
 use noodles::vcf::{self, Header};
@@ -162,11 +163,25 @@ fn is_missing(array: &SampleArray) -> bool {
     }
 }
 
+fn is_missing_info(value: &InfoValue) -> bool {
+    match value {
+        InfoValue::Character(c) => *c == '.',
+        InfoValue::String(s) => s == ".",
+        InfoValue::Array(InfoArray::Character(v)) => matches!(v.as_slice(), [None]),
+        InfoValue::Array(InfoArray::String(v)) => matches!(v.as_slice(), [None]),
+        _ => false,
+    }
+}
+
 fn normalize_bcf(record: &mut RecordBuf) -> io::Result<()> {
     let info = record.info_mut();
     for i in 0..info.keys().count() {
-        if let Some((_, Some(InfoValue::String(s)))) = info.get_index_mut(i) {
-            *s = decode(s)?;
+        if let Some((_, value)) = info.get_index_mut(i) {
+            if value.as_ref().is_some_and(is_missing_info) {
+                *value = None;
+            } else if let Some(InfoValue::String(s)) = value {
+                *s = decode(s)?;
+            }
         }
     }
 
@@ -302,6 +317,34 @@ mod tests {
             record.info().get("S").flatten(),
             Some(&Value::String("a%25b".into()))
         );
+    }
+
+    #[test]
+    fn missing_scalar_info_becomes_none() {
+        let mut record = RecordBuf::default();
+        record
+            .info_mut()
+            .insert("S".into(), Some(Value::String(".".into())));
+        record
+            .info_mut()
+            .insert("C".into(), Some(Value::Character('.')));
+        normalize_bcf(&mut record).unwrap();
+        assert_eq!(record.info().get("S"), Some(None));
+        assert_eq!(record.info().get("C"), Some(None));
+    }
+
+    #[test]
+    fn a_lone_missing_text_array_becomes_none() {
+        let partial = Value::Array(Array::String(vec![Some("x".into()), None]));
+        let mut record = RecordBuf::default();
+        let info = record.info_mut();
+        info.insert("S".into(), Some(Value::Array(Array::String(vec![None]))));
+        info.insert("C".into(), Some(Value::Array(Array::Character(vec![None]))));
+        info.insert("P".into(), Some(partial.clone()));
+        normalize_bcf(&mut record).unwrap();
+        assert_eq!(record.info().get("S"), Some(None));
+        assert_eq!(record.info().get("C"), Some(None));
+        assert_eq!(record.info().get("P"), Some(Some(&partial)));
     }
 
     #[test]

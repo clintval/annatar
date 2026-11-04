@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use anndata::backend::{Compression, WriteConfig, set_default_write_config};
 use anndata::data::DataFrameIndex;
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, ElemCollectionOp};
 use anndata_hdf5::H5;
@@ -36,6 +37,11 @@ pub struct Output {
 }
 
 pub fn write_h5ad(path: &Path, output: Output) -> Result<()> {
+    // Stock h5py has no Blosc filter, which the default Zstd setting would require.
+    set_default_write_config(WriteConfig {
+        compression: Some(Compression::Gzip(4)),
+        block_size: None,
+    });
     let adata = AnnData::<H5>::new(path)?;
     adata.set_obs_names(DataFrameIndex::from(output.obs_names))?;
     adata.set_var_names(DataFrameIndex::from(output.var_names))?;

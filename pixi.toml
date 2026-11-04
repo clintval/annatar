@@ -12,7 +12,7 @@ fmt = "cargo fmt"
 fmt-check = "cargo fmt -- --check"
 lint = { cmd = "cargo clippy --all-targets --all-features -- -D warnings", env = { CARGO_BUILD_JOBS = "4" } }
 fixture-h5ad = { cmd = "cargo test --lib writes_fixture -- --ignored", env = { CARGO_BUILD_JOBS = "4" } }
-test-readback = "pytest tests/python"
+test-readback = { cmd = "pytest tests/python", depends-on = ["build", "fixture-h5ad"] }
 
 [dependencies]
 anndata = ">=0.10"

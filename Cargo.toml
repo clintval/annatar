@@ -38,15 +38,20 @@ anndata = "0.8"
 anndata-hdf5 = "0.5"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
+env_logger = "0.11"
 flate2 = "1"
+log = "0.4"
 nalgebra-sparse = "0.11"
 ndarray = "0.17"
 noodles = { version = "0.116", features = ["bcf", "bgzf", "core", "vcf"] }
 noodles-bgzf = { version = "0.51", features = ["libdeflate"] }
 percent-encoding = "2.3.2"
 polars = { version = "0.55", default-features = false, features = ["dtype-categorical"] }
+sha2 = "0.11"
 
 [dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
 rstest = "0.28.0"
 tempfile = "3"
 

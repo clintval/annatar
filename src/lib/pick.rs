@@ -1,15 +1,31 @@
 use std::cmp::Reverse;
 use std::collections::HashSet;
+use std::fmt::Write;
 use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, anyhow, bail};
 use flate2::read::MultiGzDecoder;
+use sha2::{Digest, Sha256};
 
 use crate::consequence::{impact_rank, is_up_or_downstream, most_severe};
 use crate::csq::{CsqEntry, CsqIndex};
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+#[derive(Clone, Debug)]
+pub struct Hashed<T> {
+    pub value: T,
+    pub sha256: String,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hex = String::new();
+    for byte in Sha256::digest(bytes) {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Genes(HashSet<String>);
@@ -18,18 +34,29 @@ impl Genes {
     pub fn contains(&self, name: &str) -> bool {
         self.0.contains(name)
     }
+
+    pub fn sorted(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.0.iter().cloned().collect();
+        names.sort_unstable();
+        names
+    }
 }
 
-pub fn read_genes(path: &Path) -> anyhow::Result<Genes> {
-    let text = std::fs::read_to_string(path)
+pub fn read_genes(path: &Path) -> anyhow::Result<Hashed<Genes>> {
+    let bytes = std::fs::read(path)
         .with_context(|| format!("cannot read the genes file {}", path.display()))?;
+    let text = std::str::from_utf8(&bytes)
+        .with_context(|| format!("the genes file {} is not text", path.display()))?;
     let names = text
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_string)
         .collect();
-    Ok(Genes(names))
+    Ok(Hashed {
+        value: Genes(names),
+        sha256: sha256_hex(&bytes),
+    })
 }
 
 #[derive(Clone, Debug, Default)]
@@ -42,9 +69,10 @@ fn without_version(id: &str) -> &str {
     id.split('.').next().unwrap_or(id)
 }
 
-pub fn read_mane_table(path: &Path) -> anyhow::Result<ManeTable> {
+pub fn read_mane_table(path: &Path) -> anyhow::Result<Hashed<ManeTable>> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("cannot read the MANE table {}", path.display()))?;
+    let sha256 = sha256_hex(&bytes);
     let text = if bytes.starts_with(&GZIP_MAGIC) {
         let mut text = String::new();
         MultiGzDecoder::new(bytes.as_slice())
@@ -86,7 +114,10 @@ pub fn read_mane_table(path: &Path) -> anyhow::Result<ManeTable> {
             _ => false,
         };
     }
-    Ok(table)
+    Ok(Hashed {
+        value: table,
+        sha256,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1021,10 +1052,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("genes.txt");
         std::fs::write(&path, "# panel\nTP53\n\n  BRCA1  \nENSG00000139618\n").unwrap();
-        let panel = read_genes(&path).unwrap();
+        let panel = read_genes(&path).unwrap().value;
         assert_eq!(panel.0.len(), 3);
         assert!(panel.contains("BRCA1"));
         assert!(panel.contains("ENSG00000139618"));
+        assert_eq!(panel.sorted(), ["BRCA1", "ENSG00000139618", "TP53"]);
+    }
+
+    #[test]
+    fn read_genes_hashes_the_bytes_it_parsed() {
+        const SHA256_OF_ABC: &str =
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("genes.txt");
+        std::fs::write(&path, "abc").unwrap();
+        let panel = read_genes(&path).unwrap();
+        assert_eq!(panel.sha256, SHA256_OF_ABC);
+        assert!(panel.value.contains("abc"));
+    }
+
+    #[test]
+    fn read_mane_table_hashes_the_bytes_it_read() {
+        let path = Path::new("tests/data/mane-summary.txt");
+        let expected = sha256_hex(&std::fs::read(path).unwrap());
+        assert_eq!(read_mane_table(path).unwrap().sha256, expected);
     }
 
     fn assert_fixture_table(mane: &ManeTable) {
@@ -1038,7 +1089,9 @@ mod tests {
 
     #[test]
     fn read_mane_table_reads_the_plain_fixture() {
-        let mane = read_mane_table(Path::new("tests/data/mane-summary.txt")).unwrap();
+        let mane = read_mane_table(Path::new("tests/data/mane-summary.txt"))
+            .unwrap()
+            .value;
         assert_fixture_table(&mane);
     }
 
@@ -1051,7 +1104,7 @@ mod tests {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&text).unwrap();
         std::fs::write(&path, encoder.finish().unwrap()).unwrap();
-        assert_fixture_table(&read_mane_table(&path).unwrap());
+        assert_fixture_table(&read_mane_table(&path).unwrap().value);
     }
 
     #[test]

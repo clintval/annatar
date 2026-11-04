@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use polars::prelude::{Categories, Column, DataFrame, DataType, NamedFrom, Series};
 
 use crate::alleles::variant_name;
@@ -236,6 +238,20 @@ impl VarTable {
         Ok(())
     }
 
+    pub fn duplicate_column(&self) -> Option<&str> {
+        let mut seen = HashSet::new();
+        RECORD_NAMES
+            .into_iter()
+            .chain(self.csq_columns.iter().map(|(name, _)| name.as_str()))
+            .chain(
+                DERIVED_NAMES
+                    .into_iter()
+                    .filter(|name| self.with_genes || *name != "worst_panel_impact"),
+            )
+            .chain(self.info.iter().map(|(name, _)| name.as_str()))
+            .find(|name| !seen.insert(*name))
+    }
+
     fn consequence<'a>(&self, entry: &'a CsqEntry) -> Option<&'a str> {
         entry.get(self.csq.as_ref()?, "Consequence")
     }
@@ -305,6 +321,32 @@ mod tests {
         CsqEntry {
             values: values.iter().map(ToString::to_string).collect(),
         }
+    }
+
+    #[test]
+    fn info_columns_expanding_to_one_name_are_a_duplicate() {
+        let info = [
+            spec("X", Shape::RefAlt, Kind::Integer),
+            spec("X_ref", Shape::Scalar, Kind::Integer),
+        ];
+        let table = VarTable::new(&info, None, &Exclusions::default(), false);
+        assert_eq!(table.duplicate_column(), Some("X_ref"));
+    }
+
+    #[test]
+    fn a_csq_subfield_named_like_a_record_column_is_a_duplicate() {
+        let csq = index(&["Allele", "pos"]);
+        let table = VarTable::new(&[], Some(&csq), &Exclusions::default(), false);
+        assert_eq!(table.duplicate_column(), Some("pos"));
+    }
+
+    #[test]
+    fn worst_panel_impact_only_collides_with_genes() {
+        let csq = index(&["worst_panel_impact"]);
+        let without = VarTable::new(&[], Some(&csq), &Exclusions::default(), false);
+        let with = VarTable::new(&[], Some(&csq), &Exclusions::default(), true);
+        assert_eq!(without.duplicate_column(), None);
+        assert_eq!(with.duplicate_column(), Some("worst_panel_impact"));
     }
 
     fn row(pos: usize, alt: &str) -> RecordRow {

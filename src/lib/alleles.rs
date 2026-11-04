@@ -1,16 +1,22 @@
 pub fn vep_alleles(reference: &str, alternates: &[String]) -> Vec<String> {
     let first = reference.chars().next();
-    let shared = first.is_some_and(|base| {
-        alternates
-            .iter()
-            .all(|alt| !alt.starts_with('<') && alt != "*" && alt.starts_with(base))
-    });
+    let is_indel = alternates.iter().any(|alt| alt.len() != reference.len());
+    let shared = is_indel
+        && first.is_some_and(|base| {
+            alternates
+                .iter()
+                .filter(|alt| !alt.contains('*'))
+                .all(|alt| alt.starts_with(base))
+        });
     if !shared {
         return alternates.to_vec();
     }
     alternates
         .iter()
         .map(|alt| {
+            if alt.contains('*') {
+                return alt.clone();
+            }
             let trimmed = &alt[first.map_or(0, char::len_utf8)..];
             if trimmed.is_empty() {
                 "-".to_string()
@@ -45,6 +51,15 @@ mod tests {
     #[case("A", &["G", "AT"], &["G", "AT"])]
     #[case("A", &["*"], &["*"])]
     #[case("A", &["<DEL>"], &["<DEL>"])]
+    #[case("AC", &["AT"], &["AT"])]
+    #[case("AC", &["AT", "A"], &["T", "-"])]
+    #[case("AT", &["A", "*"], &["-", "*"])]
+    #[case("A", &["AT", "<*>"], &["T", "<*>"])]
+    #[case("AC", &["AT", "<*>"], &["T", "<*>"])]
+    #[case("A", &["AT", "<NON_REF>"], &["AT", "<NON_REF>"])]
+    #[case("AT", &["*"], &["*"])]
+    #[case("A", &["G", "T"], &["G", "T"])]
+    #[case("AT", &["A"], &["-"])]
     fn vep_alleles_trims_shared_first_base(
         #[case] reference: &str,
         #[case] alternates: &[&str],
