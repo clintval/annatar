@@ -6,4 +6,5 @@ pub mod genotype;
 pub mod h5ad;
 pub mod input;
 pub mod matrix;
+pub mod pick;
 pub mod text;

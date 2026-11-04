@@ -53,6 +53,7 @@ dependencies = [
  "anndata-hdf5",
  "anyhow",
  "clap",
+ "flate2",
  "nalgebra-sparse",
  "ndarray",
  "noodles",

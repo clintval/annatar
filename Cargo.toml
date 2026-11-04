@@ -38,6 +38,7 @@ anndata = "0.8"
 anndata-hdf5 = "0.5"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
+flate2 = "1"
 nalgebra-sparse = "0.11"
 ndarray = "0.17"
 noodles = { version = "0.116", features = ["bcf", "bgzf", "core", "vcf"] }
