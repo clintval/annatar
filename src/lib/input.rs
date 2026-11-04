@@ -9,7 +9,6 @@ use noodles::bgzf;
 use noodles::vcf::variant::RecordBuf;
 use noodles::vcf::variant::record_buf::Samples;
 use noodles::vcf::variant::record_buf::info::field::Value as InfoValue;
-use noodles::vcf::variant::record_buf::info::field::value::Array as InfoArray;
 use noodles::vcf::variant::record_buf::samples::sample::Value as SampleValue;
 use noodles::vcf::variant::record_buf::samples::sample::value::Array as SampleArray;
 use noodles::vcf::{self, Header};
@@ -43,23 +42,15 @@ pub fn open_variants(path: &Path, threads: NonZeroUsize) -> anyhow::Result<Varia
         let mut reader = bcf::io::Reader::from(inner);
         let header = read_header(|| reader.read_header())?;
         let samples = checked_samples(&header)?;
-        let mut record = bcf::Record::default();
-        let mut n = 0usize;
-        let reader_header = header.clone();
-        let records = std::iter::from_fn(move || {
-            match reader.read_record(&mut record) {
-                Ok(0) => return None,
-                Ok(_) => {}
-                Err(e) => return Some(Err(e)),
-            }
-            n += 1;
-            let name = record
-                .reference_sequence_name(reader_header.string_maps())
-                .ok();
-            let pos = record.variant_start().and_then(Result::ok).map(usize::from);
-            let locus = locus(name, pos, n);
-            Some(convert(&reader_header, &record, &locus))
-        });
+        let records = record_iter(
+            header.clone(),
+            move |record: &mut bcf::Record| reader.read_record(record),
+            |record, header| {
+                let name = record.reference_sequence_name(header.string_maps())?;
+                Ok(format!("{name}:{}", position(record.variant_start())?))
+            },
+            true,
+        );
         Ok(VariantSource {
             header,
             samples,
@@ -69,21 +60,15 @@ pub fn open_variants(path: &Path, threads: NonZeroUsize) -> anyhow::Result<Varia
         let mut reader = vcf::io::Reader::new(inner);
         let header = read_header(|| reader.read_header())?;
         let samples = checked_samples(&header)?;
-        let mut record = vcf::Record::default();
-        let mut n = 0usize;
-        let reader_header = header.clone();
-        let records = std::iter::from_fn(move || {
-            match reader.read_record(&mut record) {
-                Ok(0) => return None,
-                Ok(_) => {}
-                Err(e) => return Some(Err(e)),
-            }
-            n += 1;
-            let name = Some(record.reference_sequence_name());
-            let pos = record.variant_start().and_then(Result::ok).map(usize::from);
-            let locus = locus(name, pos, n);
-            Some(convert(&reader_header, &record, &locus))
-        });
+        let records = record_iter(
+            header.clone(),
+            move |record: &mut vcf::Record| reader.read_record(record),
+            |record, _| {
+                let name = record.reference_sequence_name();
+                Ok(format!("{name}:{}", position(record.variant_start())?))
+            },
+            false,
+        );
         Ok(VariantSource {
             header,
             samples,
@@ -92,11 +77,53 @@ pub fn open_variants(path: &Path, threads: NonZeroUsize) -> anyhow::Result<Varia
     }
 }
 
-fn locus(name: Option<&str>, pos: Option<usize>, ordinal: usize) -> String {
-    match (name, pos) {
-        (Some(name), Some(pos)) => format!("{name}:{pos}"),
-        _ => format!("record {ordinal}"),
+fn position(start: Option<io::Result<noodles::core::Position>>) -> io::Result<usize> {
+    match start {
+        Some(result) => result.map(usize::from),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing position",
+        )),
     }
+}
+
+fn record_iter<R>(
+    header: Header,
+    mut read: impl FnMut(&mut R) -> io::Result<usize>,
+    locus_of: impl Fn(&R, &Header) -> io::Result<String>,
+    needs_decoding: bool,
+) -> impl Iterator<Item = io::Result<RecordBuf>>
+where
+    R: Default + vcf::variant::Record,
+{
+    let mut record = R::default();
+    let mut ordinal = 0usize;
+    std::iter::from_fn(move || {
+        ordinal += 1;
+        match read(&mut record) {
+            Ok(0) => return None,
+            Ok(_) => {}
+            Err(e) => return Some(Err(with_context(&format!("record {ordinal}"), &e))),
+        }
+        let locus = match locus_of(&record, &header) {
+            Ok(locus) => locus,
+            Err(e) => return Some(Err(with_context(&format!("record {ordinal}"), &e))),
+        };
+        Some(
+            RecordBuf::try_from_variant_record(&header, &record)
+                .and_then(|mut buf| {
+                    if needs_decoding {
+                        normalize_bcf(&mut buf)?;
+                    }
+                    Ok(buf)
+                })
+                .map_err(|e| with_context(&locus, &e)),
+        )
+    })
+}
+
+fn with_context(locus: &str, e: &io::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("{locus}: {e}"))
 }
 
 fn read_header(read: impl FnOnce() -> io::Result<Header>) -> anyhow::Result<Header> {
@@ -116,17 +143,6 @@ fn checked_samples(header: &Header) -> anyhow::Result<Vec<String>> {
     Ok(header.sample_names().iter().cloned().collect())
 }
 
-fn convert<R>(header: &Header, record: &R, locus: &str) -> io::Result<RecordBuf>
-where
-    R: vcf::variant::Record,
-{
-    let mut buf = RecordBuf::try_from_variant_record(header, record)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{locus}: {e}")))?;
-    decode_record(&mut buf)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{locus}: {e}")))?;
-    Ok(buf)
-}
-
 fn decode(s: &str) -> io::Result<String> {
     if !s.contains('%') {
         return Ok(s.to_string());
@@ -135,13 +151,6 @@ fn decode(s: &str) -> io::Result<String> {
         .decode_utf8()
         .map(std::borrow::Cow::into_owned)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-}
-
-fn decode_all(values: &[Option<String>]) -> io::Result<Vec<Option<String>>> {
-    values
-        .iter()
-        .map(|v| v.as_deref().map(decode).transpose())
-        .collect()
 }
 
 fn is_missing(array: &SampleArray) -> bool {
@@ -153,15 +162,11 @@ fn is_missing(array: &SampleArray) -> bool {
     }
 }
 
-fn decode_record(record: &mut RecordBuf) -> io::Result<()> {
+fn normalize_bcf(record: &mut RecordBuf) -> io::Result<()> {
     let info = record.info_mut();
     for i in 0..info.keys().count() {
-        if let Some((_, value)) = info.get_index_mut(i) {
-            match value {
-                Some(InfoValue::String(s)) => *s = decode(s)?,
-                Some(InfoValue::Array(InfoArray::String(v))) => *v = decode_all(v)?,
-                _ => {}
-            }
+        if let Some((_, Some(InfoValue::String(s)))) = info.get_index_mut(i) {
+            *s = decode(s)?;
         }
     }
 
@@ -175,9 +180,6 @@ fn decode_record(record: &mut RecordBuf) -> io::Result<()> {
                 .iter()
                 .map(|value| match value {
                     Some(SampleValue::String(s)) => Ok(Some(SampleValue::String(decode(s)?))),
-                    Some(SampleValue::Array(SampleArray::String(v))) => Ok(Some(
-                        SampleValue::Array(SampleArray::String(decode_all(v)?)),
-                    )),
                     Some(SampleValue::Array(a)) if is_missing(a) => Ok(None),
                     other => Ok(other.clone()),
                 })
@@ -225,7 +227,7 @@ mod tests {
     }
 
     #[rstest]
-    fn opens_every_format(#[values("basic.vcf.gz", "basic.bcf")] name: &str) {
+    fn opens_every_format(#[values("basic.vcf", "basic.vcf.gz", "basic.bcf")] name: &str) {
         let source = open(&data(name)).unwrap();
         assert_eq!(source.samples, ["c1", "c2", "c3"]);
         let records = collect(name);
@@ -252,6 +254,66 @@ mod tests {
             "{csq:?}"
         );
         assert!(!csq.iter().any(|s| s.contains("%2C")));
+    }
+
+    #[rstest]
+    fn decodes_exactly_once(#[values("basic.vcf", "basic.vcf.gz", "basic.bcf")] name: &str) {
+        let records = collect(name);
+        let csq = csq_strings(&records[2]);
+        assert!(csq.iter().any(|s| s.contains("Odd%25name")), "{csq:?}");
+    }
+
+    #[test]
+    fn missing_arrays_become_none() {
+        let mut record = RecordBuf::default();
+        let keys = ["AD".to_string()].into_iter().collect();
+        let values = vec![
+            vec![Some(SampleValue::Array(SampleArray::Integer(vec![None])))],
+            vec![Some(SampleValue::Array(SampleArray::Integer(vec![
+                Some(1),
+                None,
+            ])))],
+        ];
+        *record.samples_mut() = Samples::new(keys, values);
+        normalize_bcf(&mut record).unwrap();
+        let got: Vec<_> = record
+            .samples()
+            .values()
+            .map(|s| s.values()[0].clone())
+            .collect();
+        assert_eq!(got[0], None);
+        assert_eq!(
+            got[1],
+            Some(SampleValue::Array(SampleArray::Integer(vec![
+                Some(1),
+                None
+            ])))
+        );
+    }
+
+    #[test]
+    fn decodes_scalar_strings_once() {
+        let mut record = RecordBuf::default();
+        record
+            .info_mut()
+            .insert("S".into(), Some(Value::String("a%2525b".into())));
+        normalize_bcf(&mut record).unwrap();
+        assert_eq!(
+            record.info().get("S").flatten(),
+            Some(&Value::String("a%25b".into()))
+        );
+    }
+
+    #[test]
+    fn names_the_record_on_a_malformed_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.vcf");
+        let text = "##fileformat=VCFv4.3\n##contig=<ID=chr1>\n\
+            #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tc1\n\
+            chr1\tabc\t.\tA\tG\t.\t.\t.\tGT\t0/1\n";
+        fs::write(&path, text).unwrap();
+        let err = open(&path).unwrap().records.next().unwrap().unwrap_err();
+        assert!(err.to_string().contains("record 1"), "{err}");
     }
 
     #[test]
