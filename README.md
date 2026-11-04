@@ -53,42 +53,69 @@ bcftools view 'cells.bcf' \
 
 ## Output
 
-`X` holds a genotype code per cell and variant:
-
-| Value | Meaning |
+| Slot | Contents |
 | --- | --- |
-| not stored | no genotype, or a partial call such as `./1` |
+| `X` | Genotype of each cell at each variant |
+| `layers` | Numeric FORMAT fields, such as `AD_ref`, `AD_alt` and `DP` |
+| `obs` | Per-cell counts, `n_sites_covered` and `n_sites_alt` |
+| `var` | One row per ALT allele, named `chrom:pos:ref:alt` |
+| `uns` | Provenance and the encodings used in the file |
+
+### Genotypes
+
+| Value in `X` | Meaning |
+| --- | --- |
+| not stored | no genotype |
 | 1 | no copies of this ALT |
 | 2 | one copy of this ALT |
-| 3 | two or more copies of this ALT; a haploid call counts as homozygous |
+| 3 | two or more copies of this ALT |
 
-Layers are named from FORMAT fields, such as `AD_alt`. A stored `0` is a measured zero. A cell is covered when `GT` is called or `AD` sums above zero, so a caller that writes `0/0` for cells with no reads makes those cells covered.
+In a layer, a stored `0` is a measured zero and an unstored entry means no data.
 
-A value that is missing at a covered cell is `NaN` in a float layer and unstored in an integer layer, so `AD_alt` can hold fewer entries than `X`. Align layers by index, not by position in `.data`.
+### Variants
 
-The `var` table has one row per ALT, named `chrom:pos:ref:alt`. The alleles `*`, `<*>` and `<NON_REF>` get no row.
+Every ALT gets its own row, whether it is an SNV, indel, MNV, symbolic ALT or breakend.
+The placeholder alleles `*`, `<*>` and `<NON_REF>` get no row.
+The VCF must declare `FORMAT/AD`.
 
-VEP annotation is optional. A VCF with no `INFO/CSQ` gives no annotation columns. Otherwise the picked consequence's subfields become columns, with `consequence_rank`, `is_coding`, `is_lof` and `pick_tier`. A record with no CSQ keeps an empty row.
+### VEP Annotation
 
-Column types come from subfield names and are pinned to VEP 116, so a subfield has one type in every file. Other VEP versions run with a warning. A value that fails its type warns and makes that column text in that file. A Consequence term VEP 116 does not know warns and ranks last, as 42 in `consequence_rank`.
+VEP is optional.
+When the VCF has `INFO/CSQ`, one consequence per variant is added to `var` with its VEP subfield names, along with these columns:
 
-VEP's `--allele_number` makes matching CSQ entries exact for symbolic ALTs, breakends and `--minimal` output, and multiallelic `--minimal` output needs it. Sequence alleles match on VEP's spelling regardless, so a sequence ALT never takes another allele's entry. A sequence ALT with no matching entry is an error, which annotating after splitting fixes. A symbolic ALT or breakend with no matching entry keeps an empty row and a warning.
+| Column | Meaning |
+| --- | --- |
+| `consequence_rank` | Severity of the consequence, where lower is more severe |
+| `is_coding` | The consequence is coding |
+| `is_lof` | The consequence is loss of function |
+| `pick_tier` | `mane_select`, `mane_plus_clinical`, `canonical` or `other` |
+| `worst_panel_impact` | Highest `IMPACT` among the `--genes` panel genes |
 
-## Combining Samples
+Column types are fixed for VEP 116, so a column has the same type in every file.
+Other VEP versions run with a warning.
 
-On files with the same variants, `anndata.concat` with `merge='same'` keeps the annotation. On different variants it drops most columns, and `merge='first'` leaves the later files' variants blank, so rebuild `var` from the inputs:
+Split multiallelic records before running VEP, not after.
+Pass `--allele_number` to VEP if you use `--minimal`.
+
+## Merging Libraries
+
+Merge the h5ad files of several libraries into one AnnData.
+`anndata.concat` loses `var` annotation when the files hold different variants, so rebuild `var` from the inputs:
 
 ```python
 import anndata as ad
 import pandas as pd
 
-samples = {'a': ad.read_h5ad('a.h5ad'), 'b': ad.read_h5ad('b.h5ad')}
-adata = ad.concat(samples, join='outer', label='sample', index_unique='-')
-var = pd.concat([sample.var for sample in samples.values()])
+libraries = {'a': ad.read_h5ad('a.h5ad'), 'b': ad.read_h5ad('b.h5ad')}
+adata = ad.concat(libraries, join='outer', label='library', index_unique='-')
+var = pd.concat([library.var for library in libraries.values()])
 adata.var = var[~var.index.duplicated()].reindex(adata.var_names)
 ```
 
-Text columns can then come back as strings rather than categoricals, and read counts in `var`, such as `alt_reads`, come from the first file with that variant. An outer join on different variants also drops the stored zeros in layers, so an unstored `AD_alt` no longer means an uncovered cell.
+After merging, two things change.
+
+- Read counts in `var`, such as `alt_reads`, describe the first file with that variant.
+- Layers lose their stored zeros if the files hold different variants, so an unstored `AD_alt` no longer means an uncovered cell.
 
 ## MuData Example
 
@@ -99,14 +126,13 @@ import anndata as ad
 import mudata as md
 import numpy as np
 
-snv = ad.read_h5ad('cells.h5ad')
+variants = ad.read_h5ad('cells.h5ad')
 atac = ad.read_h5ad('cells.atac.h5ad')
-mdata = md.MuData({'atac': atac, 'snv': snv})
+mu = md.MuData({'atac': atac, 'variants': variants})
 
-var = mdata['snv'].var
 pathogenic = {'Pathogenic', 'Likely_pathogenic', 'Pathogenic/Likely_pathogenic'}
-hits = var.index[(var['SYMBOL'] == 'TP53') & var['ClinVar_CLNSIG'].isin(pathogenic)]
-carriers = np.asarray(mdata['snv'][:, hits].layers['AD_alt'].sum(axis=1)).ravel() > 0
+hits = (variants.var['SYMBOL'] == 'TP53') & variants.var['ClinVar_CLNSIG'].isin(pathogenic)
+carriers = np.asarray(variants[:, hits].layers['AD_alt'].sum(axis=1)).ravel() > 0
 ```
 
 ## Development and Testing

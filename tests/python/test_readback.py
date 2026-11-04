@@ -62,7 +62,7 @@ def test_fixture_encodings(fixture_path):
         assert a.var["INDEL"].dtype == bool
         assert list(a.uns["x_encoding"])[1].startswith("1:")
         assert a.uns["source_vcf"] == "in.vcf"
-    md.MuData({"snv": a})
+    md.MuData({"variants": a})
 
 
 def test_multiallelic_gives_one_column_per_alt(tmp_path):
@@ -538,7 +538,7 @@ def test_a_bcf_made_by_bcftools_matches_its_vcf(tmp_path, name):
 
 
 def test_mudata_constructs(tmp_path):
-    md.MuData({"snv": convert(tmp_path, "basic.vcf")})
+    md.MuData({"variants": convert(tmp_path, "basic.vcf")})
 
 
 def test_every_input_format_gives_the_same_tables(tmp_path):
@@ -646,12 +646,12 @@ def test_the_whole_question_selects_one_variant(tmp_path):
 
 
 def test_the_readme_mudata_example_selects_carriers(tmp_path):
-    mdata = md.MuData({"snv": convert(tmp_path, "question.vcf")})
-    var = mdata["snv"].var
+    variants = convert(tmp_path, "question.vcf")
+    mu = md.MuData({"variants": variants})
     pathogenic = {"Pathogenic", "Likely_pathogenic", "Pathogenic/Likely_pathogenic"}
-    hits = var.index[(var["SYMBOL"] == "TP53") & var["ClinVar_CLNSIG"].isin(pathogenic)]
-    carriers = np.asarray(mdata["snv"][:, hits].layers["AD_alt"].sum(axis=1)).ravel() > 0
-    assert carriers.shape == (mdata["snv"].n_obs,)
+    hits = (variants.var["SYMBOL"] == "TP53") & variants.var["ClinVar_CLNSIG"].isin(pathogenic)
+    carriers = np.asarray(variants[:, hits].layers["AD_alt"].sum(axis=1)).ravel() > 0
+    assert carriers.shape == (mu["variants"].n_obs,)
     assert carriers.any()
 
 
