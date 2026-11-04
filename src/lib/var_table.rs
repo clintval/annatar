@@ -446,25 +446,25 @@ mod tests {
         ];
         let csq = index(&["Consequence", "SYMBOL", "REVEL_score"]);
         let mut table = VarTable::new(&info, Some(&csq), &Exclusions::default(), true);
-        let lof = entry(&["stop_gained", "TP53", "0.9"]);
-        let silent = entry(&["synonymous_variant&intron_variant", "NPM1", "0.1"]);
+        let missense = entry(&["missense_variant", "TP53", "0.9"]);
+        let splice = entry(&["splice_donor_variant&intron_variant", "NPM1", "0.1"]);
+        let intron = entry(&["intron_variant", "KIT", "0.5"]);
         let values = |dp, indel| vec![InfoValue::Int(Some(dp)), InfoValue::Flag(indel)];
-        table
-            .push(
-                row(1, "T"),
-                values(11, true),
-                Some((&lof, Tier::ManeSelect)),
-                Some("HIGH"),
-            )
-            .unwrap();
-        table
-            .push(
-                row(2, "G"),
-                values(22, false),
-                Some((&silent, Tier::Other)),
-                Some("LOW"),
-            )
-            .unwrap();
+        let picks = [
+            (&missense, Tier::ManeSelect, "HIGH", 11, true),
+            (&splice, Tier::Other, "LOW", 22, false),
+            (&intron, Tier::Canonical, "MODIFIER", 33, true),
+        ];
+        for (i, (pick, tier, impact, dp, indel)) in picks.into_iter().enumerate() {
+            table
+                .push(
+                    row(i + 1, "T"),
+                    values(dp, indel),
+                    Some((pick, tier)),
+                    Some(impact),
+                )
+                .unwrap();
+        }
         let (_, df) = table.finish().unwrap();
 
         let ints = |name: &str| -> Vec<Option<i64>> {
@@ -482,23 +482,31 @@ mod tests {
                 .map(|v| v.map(str::to_string))
                 .collect()
         };
-        let stop_rank = i64::from(rank("stop_gained").unwrap());
-        let silent_rank = i64::from(rank("synonymous_variant").unwrap());
-        assert_eq!(
-            ints("consequence_rank"),
-            [Some(stop_rank), Some(silent_rank)]
-        );
-        assert_eq!(bools("is_coding"), [Some(true), Some(true)]);
-        assert_eq!(bools("is_lof"), [Some(true), Some(false)]);
+        let ranks = ["missense_variant", "splice_donor_variant", "intron_variant"]
+            .map(|term| Some(i64::from(rank(term).unwrap())));
+        assert_eq!(ints("consequence_rank"), ranks);
+        assert_eq!(bools("is_coding"), [Some(true), Some(false), Some(false)]);
+        assert_eq!(bools("is_lof"), [Some(false), Some(true), Some(false)]);
         assert_eq!(
             texts("pick_tier"),
-            [Some("mane_select".into()), Some("other".into())]
+            [
+                Some("mane_select".into()),
+                Some("other".into()),
+                Some("canonical".into())
+            ]
         );
         assert_eq!(
             texts("worst_panel_impact"),
-            [Some("HIGH".into()), Some("LOW".into())]
+            [
+                Some("HIGH".into()),
+                Some("LOW".into()),
+                Some("MODIFIER".into())
+            ]
         );
-        assert_eq!(texts("SYMBOL"), [Some("TP53".into()), Some("NPM1".into())]);
+        assert_eq!(
+            texts("SYMBOL"),
+            [Some("TP53".into()), Some("NPM1".into()), Some("KIT".into())]
+        );
         let revel: Vec<Option<f64>> = df
             .column("REVEL_score")
             .unwrap()
@@ -506,9 +514,9 @@ mod tests {
             .unwrap()
             .iter()
             .collect();
-        assert_eq!(revel, [Some(0.9), Some(0.1)]);
-        assert_eq!(ints("DP"), [Some(11), Some(22)]);
-        assert_eq!(bools("INDEL"), [Some(true), Some(false)]);
+        assert_eq!(revel, [Some(0.9), Some(0.1), Some(0.5)]);
+        assert_eq!(ints("DP"), [Some(11), Some(22), Some(33)]);
+        assert_eq!(bools("INDEL"), [Some(true), Some(false), Some(true)]);
     }
 
     #[test]
