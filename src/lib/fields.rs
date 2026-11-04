@@ -174,7 +174,13 @@ mod tests {
     use super::*;
 
     fn bcftools_plan(exclusions: &[&str]) -> FieldPlan {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/bcftools-1.24.vcf");
+        plan_for("bcftools-1.24.vcf", exclusions)
+    }
+
+    fn plan_for(name: &str, exclusions: &[&str]) -> FieldPlan {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(name);
         let source = open_variants(&path, NonZeroUsize::new(1).unwrap()).unwrap();
         let items = exclusions.iter().map(|s| s.parse().unwrap()).collect();
         plan_fields(&source.header, &Exclusions::new(items))
@@ -220,7 +226,20 @@ mod tests {
     #[test]
     fn excluded_info_field_is_absent() {
         let plan = bcftools_plan(&["INFO/MQ"]);
+        assert_eq!(plan.skipped, bcftools_plan(&[]).skipped);
         assert!(!columns(&plan.info).contains(&"MQ".to_string()));
+    }
+
+    #[test]
+    fn field_shapes_cover_every_skip_and_kind() {
+        let plan = plan_for("field-shapes.vcf", &[]);
+        assert_eq!(columns(&plan.info), ["NOTE"]);
+        assert_eq!(plan.info[0].kind, Kind::Text);
+        assert_eq!(
+            columns(&plan.format),
+            ["AD_ref", "AD_alt", "PAIR_1", "PAIR_2"]
+        );
+        assert_eq!(plan.skipped, ["INFO/GL", "INFO/VAR", "FORMAT/FT"]);
     }
 
     #[test]
