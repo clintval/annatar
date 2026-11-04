@@ -13,6 +13,7 @@ import scipy.sparse as sp
 REPO = Path(__file__).resolve().parents[2]
 BINARY = REPO / "target" / "release" / "annatar"
 DATA = REPO / "tests" / "data"
+X_ENCODING = "number of copies of this ALT in the called genotype; hom-ref and uncalled are not stored"
 
 
 def read(path):
@@ -25,7 +26,7 @@ def read(path):
 def convert(tmp_path, name, *flags):
     output = tmp_path / f"{Path(name).name}.h5ad"
     subprocess.run(
-        [BINARY, "--output", output, *flags, DATA / name],
+        [BINARY, *flags, DATA / name, output],
         check=True,
         capture_output=True,
     )
@@ -53,14 +54,14 @@ def test_fixture_encodings(fixture_path):
         warnings.filterwarnings("ignore", message=".*future.infer_string.*")
         a = ad.read_h5ad(fixture_path)
         assert a.shape == (3, 2) and a.X.dtype == np.int8 and sp.issparse(a.X)
-        assert a.layers["AD_alt"].nnz == 2 and a.layers["AD_alt"][0, 0] == 0
-        assert np.isnan(a.layers["VAF"].toarray()[0, 0])
+        assert a.layers["AD_alt"].nnz == 2 and a.layers["AD_alt"][0, 0] == 2
+        assert a.layers["VAF"].toarray()[0, 0] == 0.5
         assert isinstance(a.var["SYMBOL"].dtype, pd.CategoricalDtype)
         assert pd.isna(a.var["SYMBOL"].iloc[1])
         assert np.isnan(a.var["REVEL_score"].iloc[1])
         assert str(a.var["AC"].dtype) == "Int64" and pd.isna(a.var["AC"].iloc[1])
         assert a.var["INDEL"].dtype == bool
-        assert list(a.uns["x_encoding"])[1].startswith("1:")
+        assert a.uns["x_encoding"] == X_ENCODING
         assert a.uns["source_vcf"] == "in.vcf"
     md.MuData({"variants": a})
 
@@ -75,7 +76,7 @@ def test_multiallelic_gives_one_column_per_alt(tmp_path):
     ]
     t, g = a.var_names.get_loc("chr1:100:C:T"), a.var_names.get_loc("chr1:100:C:G")
     c1 = a.obs_names.get_loc("c1")
-    assert dense(a.X)[c1, t] == 1 and dense(a.X)[c1, g] == 2
+    assert dense(a.X)[c1, t] == 0 and dense(a.X)[c1, g] == 1
     assert list(a.var["Consequence"].iloc[:2]) == ["missense_variant", "stop_gained"]
     assert list(a.var["AC"].iloc[:2]) == [2, 3]
     assert list(a.var["alt_reads"].iloc[:2]) == [11, 9]
@@ -88,13 +89,14 @@ def test_multiallelic_indels_match_trimmed_vep_alleles(tmp_path):
 
 def test_allele_number_matches_by_position_in_the_alt_list(tmp_path):
     a = convert(tmp_path, "allele-number.vcf")
-    assert a.var.loc["chr1:100:CG:CT", "Allele"] == "T"
+    assert a.var.loc["chr1:100:CG:CT", "Allele"] == "CT"
     assert a.var.loc["chr1:200:AT:A", "Consequence"] == "stop_gained"
     assert a.var.loc["chr1:200:AT:ATT", "Consequence"] == "frameshift_variant"
     assert a.var.loc["chr1:300:C:C[chr1:900[", "Allele"] == "C[chr1:900["
     assert a.var.loc["chr1:300:C:C[chr1:900[", "Consequence"] == "coding_sequence_variant"
     assert a.var.loc["chr1:400:C:<DEL>", "Allele"] == "deletion"
     assert a.var.loc["chr1:500:A:G", "Consequence"] == "missense_variant"
+    assert a.var.loc["chr1:600:A:<STR4>", "Allele"] == "short_tandem_repeat"
 
 
 @pytest.mark.parametrize(
@@ -136,33 +138,44 @@ def test_vep_true_symbolic_and_breakend_records_convert(tmp_path, name, variant,
     assert a.var.loc[variant, "pick_tier"] == "canonical"
 
 
-def test_split_snvs_pick_their_own_allele_whatever_the_stale_numbers_say(tmp_path):
-    a = convert(tmp_path, "split-after-vep-snv.vcf")
-    assert a.var.loc["chr1:100:G:A", "Allele"] == "A"
-    assert a.var.loc["chr1:100:G:A", "Consequence"] == "stop_gained"
-    assert a.var.loc["chr1:100:G:T", "Allele"] == "T"
-    assert a.var.loc["chr1:100:G:T", "Consequence"] == "intron_variant"
+@pytest.mark.parametrize("name", ["breakend-reference-side.vcf", "breakend-reference-side-no-number.vcf"])
+def test_a_breakend_with_no_entry_of_its_own_keeps_the_reference_side(tmp_path, name):
+    a = convert(tmp_path, name)
+    assert a.var.loc["chr1:100:C:C[chr9:500[", "Allele"] == "C."
+    assert a.var.loc["chr1:100:C:C[chr9:500[", "Consequence"] == "feature_truncation"
+    assert a.var.loc["chr1:200:C:C[chr9:500[", "Allele"] == "C."
+    assert a.var.loc["chr1:200:C:C[chr1:901[", "Allele"] == "C[chr1:901["
 
 
-def test_split_breakends_ignore_numbers_past_the_alt_count(tmp_path):
-    a = convert(tmp_path, "split-after-vep-breakend.vcf")
-    assert a.var.loc["chr1:100:C:C[chr1:901[", "Consequence"] == "coding_sequence_variant"
-    assert a.var.loc["chr1:100:C:C[chr1:902[", "Consequence"] == "intron_variant"
+def test_a_split_breakend_keeps_an_empty_row_rather_than_its_siblings_entry(tmp_path):
+    a = convert(tmp_path, "pick-split-breakend.vcf")
+    row = a.var.loc["chr1:100:C:C[chr1:902["]
+    assert pd.isna(row["Allele"]) and pd.isna(row["Consequence"])
 
 
-def test_a_breakend_with_no_entry_for_its_number_keeps_the_reference_side(tmp_path):
-    a = convert(tmp_path, "breakend-reference-side.vcf")
-    assert a.var["Allele"].tolist() == ["C."]
-    assert a.var["Consequence"].tolist() == ["feature_truncation"]
+def test_a_breakend_matches_its_own_string_before_its_number(tmp_path):
+    a = convert(tmp_path, "mixed-placement-breakends.vcf")
+    assert a.var.loc["chr1:100:C:]chr1:700]C", "Allele"] == "]chr1:700]C"
+    assert a.var.loc["chr1:100:C:C[chr2:5[", "Allele"] == ".C"
+    assert a.var.loc["chr1:100:C:C[chr2:5[", "Consequence"] == "feature_truncation"
 
 
-def test_minimal_output_with_no_numbers_needs_one_allele_on_the_record(tmp_path):
-    a = convert(tmp_path, "minimal-no-number.vcf")
-    assert a.var.loc["chr1:100:CG:CT", "Allele"] == "T"
-    assert a.var.loc["chr1:300:C:<DEL>", "Allele"] == "deletion"
-    breakend = a.var.loc["chr1:200:C:C[chr1:900["]
-    assert pd.isna(breakend["Allele"]) and pd.isna(breakend["pick_tier"])
-    assert breakend["alt_reads"] == 3
+def test_a_split_gvcf_record_keeps_its_own_allele(tmp_path):
+    a = convert(tmp_path, "gvcf-split.vcf")
+    assert a.var["Allele"].tolist() == ["T"]
+    assert a.var["Consequence"].tolist() == ["missense_variant"]
+
+
+@pytest.mark.parametrize(
+    ("name", "stops"),
+    [("errors/split-norm-line.vcf", True), ("errors/split-norm-line-interleaved.vcf", True), ("norm-before-vep.vcf", False)],
+)
+def test_header_order_survives_in_bcf(tmp_path, name, stops):
+    bcf = tmp_path / "input.bcf"
+    subprocess.run(["bcftools", "view", "-Ob", "-o", bcf, DATA / name], check=True, capture_output=True)
+    run = subprocess.run([BINARY, bcf, tmp_path / "out.h5ad"], capture_output=True, text=True)
+    assert (run.returncode != 0) == stops
+    assert ("bcftools norm splitting" in run.stderr) == stops
 
 
 def test_a_structural_alt_with_no_entry_keeps_an_empty_row(tmp_path):
@@ -174,9 +187,45 @@ def test_a_structural_alt_with_no_entry_keeps_an_empty_row(tmp_path):
     assert pd.isna(a.var.loc["chr1:200:C:C[chr1:901[", "Consequence"])
 
 
-def test_haploid_call_counts_as_homozygous(tmp_path):
+def test_a_haploid_alt_call_is_one_copy(tmp_path):
     a = convert(tmp_path, "haploid.vcf")
-    assert dense(a.X)[:, 0].tolist() == [3, 1, 0]
+    assert dense(a.X)[:, 0].tolist() == [1, 0, 0]
+
+
+def test_x_is_copies_of_this_alt_in_the_called_genotype(tmp_path):
+    a = convert(tmp_path, "copies.vcf")
+    assert a.X.dtype == np.int8
+    assert (a.X.data == 0).sum() == 0
+    g, t = a.var_names.get_loc("chr1:100:A:G"), a.var_names.get_loc("chr1:100:A:T")
+    assert dense(a.X)[:, g].tolist() == [1, 2, 1, 3, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0]
+    assert dense(a.X)[:, t].tolist() == [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+
+
+def test_coverage_is_reads_and_counts_follow_it(tmp_path):
+    a = convert(tmp_path, "copies.vcf")
+    assert a.obs["n_sites_covered"].tolist() == [2, 1, 2, 1, 1, 2, 2, 0, 2, 0, 0, 0, 2, 1]
+    assert a.obs["n_sites_alt"].tolist() == [1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1]
+    assert a.var["n_cells_covered"].tolist() == [9, 7]
+    assert a.var["n_cells_alt"].tolist() == [6, 2]
+    assert a.var["ref_reads"].tolist() == [29, 29]
+    assert a.var["alt_reads"].tolist() == [27, 7]
+
+
+def test_layers_are_plain_counts_at_any_call(tmp_path):
+    a = convert(tmp_path, "copies.vcf")
+    g = a.var_names.get_loc("chr1:100:A:G")
+    assert dense(a.layers["AD_ref"])[:, g].tolist() == [5, 0, 2, 0, 0, 7, 4, 0, 5, 0, 0, 0, 6, 0]
+    assert dense(a.layers["AD_alt"])[:, g].tolist() == [3, 6, 3, 9, 4, 0, 2, 0, 0, 0, 0, 0, 0, 0]
+    assert dense(a.layers["DP"])[:, g].tolist() == [8, 6, 5, 9, 4, 7, 6, 0, 8, 4, 0, 0, 0, 4]
+
+
+def test_a_cell_whose_reads_all_support_another_alt_is_not_covered_in_this_column(tmp_path):
+    a = convert(tmp_path, "copies.vcf")
+    cell = a.obs_names.get_loc("c14")
+    g, t = a.var_names.get_loc("chr1:100:A:G"), a.var_names.get_loc("chr1:100:A:T")
+    assert dense(a.layers["AD_ref"])[cell, g] == 0 and dense(a.layers["AD_alt"])[cell, g] == 0
+    assert a.obs["n_sites_covered"].iloc[cell] == 1
+    assert dense(a.layers["AD_alt"])[cell, t] == 4
 
 
 ANNOTATION = {
@@ -224,26 +273,28 @@ def test_no_gt_has_an_empty_x_and_still_has_layers(tmp_path):
     a = convert(tmp_path, "no-gt.vcf")
     assert a.X.nnz == 0
     assert dense(a.layers["AD_alt"]).tolist() == [[3], [0], [0]]
-    assert a.layers["AD_alt"].nnz == 2
+    assert a.layers["AD_alt"].nnz == 1
+    assert a.layers["AD_ref"].nnz == 2
     assert a.obs["n_sites_covered"].tolist() == [1, 1, 0]
 
 
-@pytest.mark.parametrize("name", ["basic.vcf", "multiallelic.vcf", "question.vcf"])
-def test_layers_share_one_sparsity_pattern(tmp_path, name):
+@pytest.mark.parametrize("name", ["basic.vcf", "multiallelic.vcf", "question.vcf", "typed-fields.vcf", "copies.vcf"])
+def test_no_matrix_stores_a_zero_or_a_nan(tmp_path, name):
     a = convert(tmp_path, name)
-    ad_ref, ad_alt, dp = (a.layers[k] for k in ["AD_ref", "AD_alt", "DP"])
-    assert np.array_equal(ad_ref.indptr, ad_alt.indptr)
-    assert np.array_equal(ad_ref.indptr, dp.indptr)
-    assert np.array_equal(ad_ref.indices, ad_alt.indices)
-    assert np.array_equal(ad_ref.indices, dp.indices)
+    assert (a.X.data == 0).sum() == 0
+    for key in a.layers.keys():
+        data = a.layers[key].data
+        assert (data == 0).sum() == 0 and not np.isnan(data).any(), key
 
 
-@pytest.mark.parametrize("name", ["basic.vcf", "multiallelic.vcf", "question.vcf"])
+@pytest.mark.parametrize("name", ["basic.vcf", "multiallelic.vcf", "question.vcf", "copies.vcf"])
 def test_obs_counts_match_the_matrices(tmp_path, name):
     a = convert(tmp_path, name)
     ad_ref, ad_alt = a.layers["AD_ref"], a.layers["AD_alt"]
-    assert a.obs["n_sites_covered"].tolist() == np.diff(ad_ref.indptr).tolist()
+    covered = np.asarray(((ad_ref + ad_alt) > 0).sum(axis=1)).ravel()
+    assert a.obs["n_sites_covered"].tolist() == covered.tolist()
     assert a.obs["n_sites_alt"].tolist() == np.asarray((ad_alt > 0).sum(axis=1)).ravel().tolist()
+    assert a.var["n_cells_covered"].tolist() == np.asarray(((ad_ref + ad_alt) > 0).sum(axis=0)).ravel().tolist()
 
 
 def test_a_missing_ref_count_still_counts_the_cell(tmp_path):
@@ -261,7 +312,7 @@ def test_skipped_alts_keep_the_original_positions(tmp_path):
     a = convert(tmp_path, "symbolic.vcf")
     column = a.var_names.get_loc("chr1:200:A:G")
     assert dense(a.layers["AD_alt"])[0, column] == 3
-    assert dense(a.X)[0, column] == 2
+    assert dense(a.X)[0, column] == 1
     assert a.var["AC"].iloc[column] == 1
 
 
@@ -271,7 +322,7 @@ def test_star_alts_get_no_row_and_keep_their_slots(tmp_path):
     assert a.var["AC"].tolist() == [1, 2]
     assert dense(a.layers["AD_alt"])[0].tolist() == [3, 3]
     assert dense(a.layers["AF"])[0].tolist() == pytest.approx([0.3, 0.3])
-    assert dense(a.X)[0].tolist() == [2, 2]
+    assert dense(a.X)[0].tolist() == [1, 1]
     assert a.obs["n_sites_alt"].tolist() == [2, 0]
     assert a.var["Consequence"].tolist() == ["frameshift_variant", "missense_variant"]
 
@@ -410,7 +461,7 @@ def test_an_empty_file_has_the_same_var_dtypes(tmp_path):
     empty = tmp_path / "empty.vcf"
     empty.write_text("".join(line for line in source if line.startswith("#")))
     output = tmp_path / "empty.h5ad"
-    subprocess.run([BINARY, "--output", output, empty], check=True, capture_output=True)
+    subprocess.run([BINARY, empty, output], check=True, capture_output=True)
     assert dtypes(read(output)) == dtypes(convert(tmp_path, "dtypes-complete.vcf"))
 
 
@@ -461,26 +512,12 @@ def test_the_readme_concat_recipe_keeps_every_value(tmp_path):
 
 
 @pytest.mark.filterwarnings("ignore:The 'future.infer_string' option")
-def test_an_outer_join_on_different_variants_loses_stored_zeros(tmp_path):
+def test_an_outer_join_on_different_variants_keeps_every_stored_value(tmp_path):
     samples = concat_inputs(tmp_path, "csq-types-b.vcf")
-    assert (samples["a"].layers["AD_alt"].data == 0).sum() == 2
     adata = ad.concat(samples, join="outer", index_unique="-")
-    assert (adata.layers["AD_alt"].data == 0).sum() == 0
+    for key in ["AD_ref", "AD_alt"]:
+        assert adata.layers[key].nnz == samples["a"].layers[key].nnz + samples["b"].layers[key].nnz
     assert adata.X.nnz == samples["a"].X.nnz + samples["b"].X.nnz
-
-
-def test_an_unranked_term_sorts_after_every_known_term(tmp_path):
-    a = convert(tmp_path, "unranked-consequence.vcf")
-    assert a.var["Feature"].iloc[0] == "ENST2"
-    assert a.var["Consequence"].iloc[0] == "intron_variant"
-    assert a.var["Consequence"].iloc[1] == "invented_variant"
-    assert a.var["consequence_rank"].tolist()[1:] == [42, 13, 42]
-
-
-def test_an_unranked_term_is_neither_coding_nor_lof(tmp_path):
-    a = convert(tmp_path, "unranked-consequence.vcf")
-    assert not a.var["is_coding"].iloc[1] and not a.var["is_lof"].iloc[1]
-    assert a.var["is_coding"].iloc[2]
 
 
 def test_every_info_shape_and_type_reads_back(tmp_path):
@@ -515,7 +552,8 @@ def test_every_format_shape_and_type_reads_back(tmp_path):
     multiallelic_t, multiallelic_c = (a.var_names.get_loc(n) for n in ["chr1:300:G:A", "chr1:300:G:C"])
     ao, vaf = dense(a.layers["AO"]), dense(a.layers["VAF"])
     assert ao[1, multiallelic_t] == 2 and ao[1, multiallelic_c] == 3
-    assert vaf.dtype == np.float32 and np.isnan(vaf[1, multiallelic_t])
+    assert vaf.dtype == np.float32 and vaf[1, multiallelic_t] == 0
+    assert not np.isnan(vaf).any()
     assert vaf[1, multiallelic_c] == pytest.approx(0.6)
     assert dense(a.layers["PAIR_2"])[0, 1] == 1
     assert dense(a.layers["RF_alt"])[0, multiallelic_c] == pytest.approx(0.9)
@@ -566,23 +604,19 @@ def test_uns_records_provenance(tmp_path):
     a = convert(tmp_path, "basic.vcf")
     assert a.uns["annatar_version"] == "0.1.0"
     assert a.uns["source_vcf"] == "basic.vcf"
-    assert "--output" in a.uns["command_line"]
+    assert a.uns["command_line"].endswith("basic.vcf.h5ad")
     assert [line.split("=")[0] for line in a.uns["vep_header"]] == ["##VEP", "##VEP-command-line"]
     assert a.uns["csq_fields"][0] == "Allele" and len(a.uns["csq_fields"]) == 19
     assert "MANE Select" in a.uns["pick_rule"]
-    assert list(a.uns["x_encoding"])[1].startswith("1:")
-    assert list(a.uns["layer_encoding"]) == [
-        "not stored: cell not covered, or an integer value missing at a covered cell",
-        "0: a measured zero",
-        "NaN: a float value missing at a covered cell",
-    ]
+    assert a.uns["x_encoding"] == X_ENCODING
+    assert "layer_encoding" not in a.uns
     assert list(a.uns["skipped_fields"]) == []
 
 
 def test_stdin_records_a_dash_as_the_source(tmp_path):
     output = tmp_path / "out.h5ad"
     subprocess.run(
-        [BINARY, "--output", output, "-"],
+        [BINARY, "-", output],
         input=(DATA / "basic.vcf").read_bytes(),
         check=True,
         capture_output=True,
@@ -616,7 +650,7 @@ def test_mane_table_records_its_digest(tmp_path):
 def test_a_piped_lookup_file_records_the_digest_of_what_was_read(tmp_path, flag, name, key):
     source = DATA / name
     output = tmp_path / "out.h5ad"
-    command = f"""'{BINARY}' --output '{output}' {flag} <(cat '{source}') '{DATA / "basic.vcf"}'"""
+    command = f"""'{BINARY}' {flag} <(cat '{source}') '{DATA / "basic.vcf"}' '{output}'"""
     subprocess.run(["bash", "-c", command], check=True, capture_output=True)
     assert read(output).uns[key] == hashlib.sha256(source.read_bytes()).hexdigest()
 
@@ -642,7 +676,7 @@ def test_the_whole_question_selects_one_variant(tmp_path):
     a = convert(tmp_path, "question.vcf")
     hits = a[:, (a.var["SYMBOL"] == "TP53") & a.var["ClinVar_CLNSIG"].isin(["Pathogenic", "Likely_pathogenic"])]
     assert list(hits.var_names) == ["chr17:7674220:C:T"]
-    assert hits.X.nnz == 3
+    assert hits.X.nnz == 2
 
 
 @pytest.mark.filterwarnings("ignore:The inplace keyword in DataFrame")
@@ -692,7 +726,7 @@ def test_large_output_reads_without_a_hdf5_plugin(tmp_path, monkeypatch):
     vcf = tmp_path / "large.vcf"
     vcf.write_text("\n".join(lines) + "\n")
     output = tmp_path / "large.h5ad"
-    subprocess.run([BINARY, "--output", output, vcf], check=True, capture_output=True)
+    subprocess.run([BINARY, vcf, output], check=True, capture_output=True)
 
     offenders = []
 
@@ -731,7 +765,7 @@ def test_floats_read_back_exactly_and_an_unvalued_csq_subfield_is_categorical(tm
     vcf = tmp_path / "floats.vcf"
     vcf.write_text("\n".join(lines) + "\n")
     output = tmp_path / "floats.h5ad"
-    subprocess.run([BINARY, "--output", output, vcf], check=True, capture_output=True)
+    subprocess.run([BINARY, vcf, output], check=True, capture_output=True)
     a = read(output)
     assert a.var["qual"].iloc[0] == 30.1
     assert a.var["SCORE"].iloc[0] == 0.1

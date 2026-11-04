@@ -100,6 +100,68 @@ mod tests {
         }
     }
 
+    const VEP_116_FREQUENCIES: [&str; 40] = [
+        "AF",
+        "AFR_AF",
+        "AMR_AF",
+        "ASN_AF",
+        "EAS_AF",
+        "EUR_AF",
+        "SAS_AF",
+        "AA_AF",
+        "EA_AF",
+        "ExAC_AF",
+        "ExAC_Adj_AF",
+        "ExAC_AFR_AF",
+        "ExAC_AMR_AF",
+        "ExAC_EAS_AF",
+        "ExAC_FIN_AF",
+        "ExAC_NFE_AF",
+        "ExAC_OTH_AF",
+        "ExAC_SAS_AF",
+        "gnomADe_AF",
+        "gnomADe_AFR_AF",
+        "gnomADe_AMR_AF",
+        "gnomADe_ASJ_AF",
+        "gnomADe_EAS_AF",
+        "gnomADe_FIN_AF",
+        "gnomADe_MID_AF",
+        "gnomADe_NFE_AF",
+        "gnomADe_REMAINING_AF",
+        "gnomADe_SAS_AF",
+        "gnomADg_AF",
+        "gnomADg_AFR_AF",
+        "gnomADg_AMI_AF",
+        "gnomADg_AMR_AF",
+        "gnomADg_ASJ_AF",
+        "gnomADg_EAS_AF",
+        "gnomADg_FIN_AF",
+        "gnomADg_MID_AF",
+        "gnomADg_NFE_AF",
+        "gnomADg_REMAINING_AF",
+        "gnomADg_SAS_AF",
+        "MAX_AF",
+    ];
+
+    #[test]
+    fn every_vep_116_frequency_is_a_float_by_its_name() {
+        for name in VEP_116_FREQUENCIES {
+            assert!(
+                matches!(type_column(name, some(&[Some("0.5")])), CsqColumn::Float(_)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_populations_of_the_largest_frequency_stay_text() {
+        let values = some(&[Some("gnomADe_AFR&gnomADg_AFR")]);
+        assert_eq!(
+            type_column("MAX_AF_POPS", values.clone()),
+            CsqColumn::Text(values)
+        );
+    }
+
     #[rstest]
     #[case("AF")]
     #[case("gnomADe_AF")]

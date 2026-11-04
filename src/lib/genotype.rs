@@ -1,47 +1,34 @@
 #[must_use]
-pub fn genotype_code(alleles: &[Option<usize>], alt_index: usize) -> Option<i8> {
-    if alleles.is_empty() || alleles.iter().any(Option::is_none) {
-        return None;
-    }
+pub fn copies_of_alt(alleles: &[Option<usize>], alt_index: usize) -> i8 {
     let copies = alleles.iter().filter(|a| **a == Some(alt_index)).count();
-    Some(match copies {
-        0 => 1,
-        1 if alleles.len() == 1 => 3,
-        1 => 2,
-        _ => 3,
-    })
-}
-
-#[must_use]
-pub fn covered(gt_called: bool, ad: &[Option<i32>]) -> bool {
-    gt_called || ad.iter().flatten().sum::<i32>() > 0
+    i8::try_from(copies).unwrap_or(i8::MAX)
 }
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    #[test]
-    fn genotype_codes() {
-        assert_eq!(genotype_code(&[Some(0), Some(0)], 1), Some(1));
-        assert_eq!(genotype_code(&[Some(0), Some(1)], 1), Some(2));
-        assert_eq!(genotype_code(&[Some(1), Some(1)], 1), Some(3));
-        assert_eq!(genotype_code(&[Some(0), Some(2)], 1), Some(1));
-        assert_eq!(genotype_code(&[Some(1)], 1), Some(3));
-        assert_eq!(
-            genotype_code(&[Some(0), Some(0), Some(0), Some(1)], 1),
-            Some(2)
-        );
-        assert_eq!(genotype_code(&[None, None], 1), None);
-        assert_eq!(genotype_code(&[Some(1), None], 1), None);
-        assert_eq!(genotype_code(&[], 1), None);
+    #[rstest]
+    #[case(&[Some(0), Some(1)], 1)]
+    #[case(&[None, Some(1)], 1)]
+    #[case(&[Some(1), None], 1)]
+    #[case(&[Some(1), Some(1)], 2)]
+    #[case(&[Some(1), Some(1), Some(1)], 3)]
+    #[case(&[Some(1)], 1)]
+    #[case(&[Some(0), Some(0), Some(0), Some(1)], 1)]
+    #[case(&[Some(0), Some(0)], 0)]
+    #[case(&[Some(0), Some(2)], 0)]
+    #[case(&[Some(0)], 0)]
+    #[case(&[None, None], 0)]
+    #[case(&[], 0)]
+    fn copies_count_this_alt_in_the_call(#[case] alleles: &[Option<usize>], #[case] copies: i8) {
+        assert_eq!(copies_of_alt(alleles, 1), copies);
     }
 
     #[test]
-    fn covered_by_gt_or_depth() {
-        assert!(covered(true, &[]));
-        assert!(covered(false, &[Some(5), None]));
-        assert!(!covered(false, &[Some(0), None]));
-        assert!(!covered(false, &[]));
+    fn copies_saturate_within_the_stored_type() {
+        assert_eq!(copies_of_alt(&[Some(1); 200], 1), i8::MAX);
     }
 }

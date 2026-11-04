@@ -17,25 +17,25 @@ use noodles::vcf::variant::record_buf::samples::sample::value::Array as SampleAr
 use noodles::vcf::variant::record_buf::samples::sample::value::genotype::Allele;
 use polars::prelude::{DataFrame, NamedFrom, Series};
 
-use crate::alleles::{is_skipped_alt, is_structural, vep_alleles};
+use crate::alleles::{is_skipped_alt, vep_alleles};
 use crate::consequence::{VEP_RELEASE, rank, vep_major};
 use crate::csq::{CsqEntry, CsqIndex, parse_entries};
 use crate::fields::{Exclusions, FieldPlan, FieldSpec, Kind, Section, Shape, plan_fields};
-use crate::genotype::{covered, genotype_code};
-use crate::h5ad::{LAYER_ENCODING, Output, UnsValue, X_ENCODING, write_h5ad};
+use crate::genotype::copies_of_alt;
+use crate::h5ad::{Output, UnsValue, X_ENCODING, write_h5ad};
 use crate::input::{VariantSource, open_variants};
 use crate::matrix::{Cell, SparseBuilder};
 use crate::pick::{
-    AltAllele, Genes, Hashed, ManeTable, PickContext, Picked, allele_values, entries_for_allele,
+    AltAllele, Genes, Hashed, MINIMAL_OUTPUT, ManeTable, PickContext, Picked, entries_for_allele,
     missing_tie_fields, pick, read_genes, read_mane_table, worst_panel_impact,
 };
 use crate::var_table::{InfoValue, RecordRow, VarColumns, VarTable, widen};
 
-const PICK_RULE: &str = "1. Keep this ALT's CSQ entries. A sequence ALT, unless CSQ declares \
-    MINIMISED, keeps the entries whose Allele is VEP's spelling of the ALT. A symbolic ALT, a \
-    breakend or any ALT under MINIMISED keeps its ALLELE_NUM entries when no number passes the \
-    ALT count, else every entry on a record with one ALT whose entries name one allele, else \
-    the entries with VEP's spelling. \
+const PICK_RULE: &str = "1. Keep this ALT's CSQ entries. Evidence of a split after VEP stops the \
+    run. A sequence ALT keeps the entries whose Allele is VEP's spelling of the ALT. A breakend \
+    keeps the entries that spell it verbatim. Otherwise a symbolic ALT or breakend keeps its \
+    ALLELE_NUM entries, or the entries with VEP's spelling when ALLELE_NUM is not declared, and \
+    a breakend with none of its own keeps its reference-side entries. \
     2. Keep the entries of the genes the variant lies in, preferring the --genes panel; \
     when it lies in no gene, keep every entry. \
     3. Keep the MANE Select and MANE Plus Clinical entries if any, \
@@ -72,11 +72,12 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
 
     let VariantSource {
         header,
+        header_lines,
         samples,
         records,
     } = open_variants(&config.input, config.threads)?;
     let csq = read_csq(&header, &config.exclusions)?;
-    check_header(&header, csq.as_ref(), &config.exclusions)?;
+    check_header(&header, &header_lines, csq.as_ref(), &config.exclusions)?;
     let plan = plan_fields(&header, &config.exclusions);
     check_layer_names(&plan)?;
     let uns = provenance(
@@ -135,7 +136,7 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
     } = var.finish()?;
     let matrices = matrix.finish();
     for (field, count) in &matrices.missing {
-        warn!("{field}: missing in {count} of the covered cells");
+        warn!("{field}: missing in {count} of the cells with reads");
     }
     warn_about_counts(skipped_alts, structural_without_entry, records_without_alt);
 
@@ -197,9 +198,16 @@ fn read_csq(header: &Header, exclusions: &Exclusions) -> anyhow::Result<Option<C
 
 fn check_header(
     header: &Header,
+    header_lines: &[String],
     csq: Option<&CsqIndex>,
     exclusions: &Exclusions,
 ) -> anyhow::Result<()> {
+    check_not_minimal(header, csq)?;
+    if csq.is_some() && split_after_vep(header_lines) {
+        bail!(
+            "the header shows bcftools norm splitting multiallelics after VEP; annotate after splitting"
+        );
+    }
     if let Some(name) = exclusions.undeclared(header, csq).first() {
         bail!("--exclude-field {name} names nothing in this VCF's header");
     }
@@ -208,6 +216,50 @@ fn check_header(
     };
     if ad.number() != format::Number::ReferenceAlternateBases || ad.ty() != format::Type::Integer {
         bail!("FORMAT/AD must be declared Number=R, Type=Integer");
+    }
+    Ok(())
+}
+
+fn names_minimal(command_line: &str) -> bool {
+    command_line
+        .split_whitespace()
+        .any(|token| token.trim_matches(['\'', '"']) == "--minimal")
+}
+
+fn splits_multiallelics(norm_command: &str) -> bool {
+    let mut tokens = norm_command.split_whitespace().peekable();
+    while let Some(token) = tokens.next() {
+        let value = match token {
+            "-m" | "--multiallelics" => tokens.peek().copied(),
+            _ => token
+                .strip_prefix("--multiallelics=")
+                .or_else(|| token.strip_prefix("-m")),
+        };
+        if value.is_some_and(|value| value.starts_with('-')) {
+            return true;
+        }
+    }
+    false
+}
+
+fn split_after_vep(header_lines: &[String]) -> bool {
+    header_lines
+        .iter()
+        .skip_while(|line| !line.starts_with("##VEP-command-line="))
+        .filter_map(|line| line.strip_prefix("##bcftools_normCommand="))
+        .any(splits_multiallelics)
+}
+
+fn check_not_minimal(header: &Header, csq: Option<&CsqIndex>) -> anyhow::Result<()> {
+    let Some(index) = csq else {
+        return Ok(());
+    };
+    let on_the_command_line = vep_header(header)
+        .iter()
+        .filter_map(|line| line.strip_prefix("##VEP-command-line="))
+        .any(names_minimal);
+    if index.position("MINIMISED").is_some() || on_the_command_line {
+        bail!(MINIMAL_OUTPUT);
     }
     Ok(())
 }
@@ -314,14 +366,7 @@ fn provenance(
             csq.map(|index| index.names.clone()).unwrap_or_default(),
         ),
         text("pick_rule", PICK_RULE.to_string()),
-        list(
-            "x_encoding",
-            X_ENCODING.iter().map(ToString::to_string).collect(),
-        ),
-        list(
-            "layer_encoding",
-            LAYER_ENCODING.iter().map(ToString::to_string).collect(),
-        ),
+        text("x_encoding", X_ENCODING.to_string()),
         list("skipped_fields", plan.skipped.clone()),
     ];
     if let Some(genes) = genes {
@@ -559,11 +604,12 @@ fn int_at(value: Option<&SampleValue>, position: usize) -> Option<i32> {
 }
 
 fn float_at(value: Option<&SampleValue>, position: usize) -> Option<f32> {
-    match value? {
+    let value = match value? {
         SampleValue::Float(x) => Some(*x),
         SampleValue::Array(SampleArray::Float(values)) => values.get(position).copied().flatten(),
         _ => None,
-    }
+    };
+    value.filter(|x| !x.is_nan())
 }
 
 fn reads_at(depths: &[Option<i32>], position: usize) -> u64 {
@@ -593,36 +639,14 @@ struct AltPick {
     without_entry: bool,
 }
 
-fn no_entry_message(entries: &[CsqEntry], index: &CsqIndex, allele: &AltAllele) -> String {
-    let AltAllele { alt, spelling, .. } = allele;
-    let values = allele_values(entries, index).join(", ");
-    let spelled = if spelling.eq_ignore_ascii_case(alt) {
-        String::new()
-    } else {
-        format!(", spelled {spelling} by VEP,")
-    };
-    let numbers_would_help = allele.n_alts > 1
-        && index.position("MINIMISED").is_some()
-        && index.position("ALLELE_NUM").is_none();
-    let remedy = if numbers_would_help {
-        "annotate after splitting, or with VEP's --allele_number for multiallelic --minimal output"
-    } else {
-        "annotate after splitting"
-    };
-    format!("no CSQ entry for ALT {alt}{spelled} among the Allele values {values}; {remedy}")
-}
-
 impl Lookups<'_> {
     fn pick(&self, entries: &[CsqEntry], allele: &AltAllele) -> anyhow::Result<AltPick> {
         let index = match self.csq {
             Some(index) if !entries.is_empty() => index,
             _ => return Ok(AltPick::default()),
         };
-        let candidates = entries_for_allele(entries, index, allele);
+        let candidates = entries_for_allele(entries, index, allele)?;
         if candidates.is_empty() {
-            if !is_structural(allele.alt) {
-                bail!(no_entry_message(entries, index, allele));
-            }
             return Ok(AltPick {
                 without_entry: true,
                 ..AltPick::default()
@@ -720,7 +744,7 @@ impl<'a> Conversion<'a> {
                 alt,
                 spelling,
                 number: position + 1,
-                n_alts: alts.len(),
+                alts,
             };
             let AltPick {
                 picked,
@@ -779,28 +803,27 @@ impl<'a> Conversion<'a> {
             .collect();
         let allele = alt_position + 1;
         let n_obs = self.n_sites_covered.len();
-        let mut rows = Vec::new();
-        let mut codes = Vec::new();
-        let mut cells = vec![Vec::new(); slots.len()];
         let mut alleles = Vec::new();
         let mut totals = ColumnTotals::default();
 
         for (row, sample) in (0u32..).zip(0..n_obs) {
             samples.fill_alleles(sample, &mut alleles);
-            let code = genotype_code(&alleles, allele);
+            self.matrix
+                .push_copies(row, copies_of_alt(&alleles, allele));
             let depths = samples.allelic_depths(sample);
-            if !covered(code.is_some(), depths) {
+            let has_reads = depths.iter().flatten().any(|reads| *reads > 0);
+            for (slot, &(layer, position, kind)) in slots.iter().enumerate() {
+                let cell = samples.cell(layer, sample, position, kind);
+                self.matrix.push_cell(slot, row, cell, has_reads);
+            }
+            let ref_reads = reads_at(depths, 0);
+            let alt_reads = reads_at(depths, allele);
+            if ref_reads + alt_reads == 0 {
                 continue;
             }
-            rows.push(row);
-            codes.push(code);
-            for (column, &(layer, position, kind)) in cells.iter_mut().zip(&slots) {
-                column.push(samples.cell(layer, sample, position, kind));
-            }
 
-            let alt_reads = reads_at(depths, allele);
             totals.n_cells_covered += 1;
-            totals.ref_reads += reads_at(depths, 0);
+            totals.ref_reads += ref_reads;
             totals.alt_reads += alt_reads;
             self.n_sites_covered[sample] += 1;
             if alt_reads > 0 {
@@ -808,14 +831,76 @@ impl<'a> Conversion<'a> {
                 self.n_sites_alt[sample] += 1;
             }
         }
-        self.matrix.push_column(&rows, &codes, &cells);
+        self.matrix.end_column();
         totals
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
+
+    #[rstest]
+    #[case("norm -m -any in.vcf; Date=Wed Nov", true)]
+    #[case("norm -m-any in.vcf; Date=Wed Nov", true)]
+    #[case("norm -m -both in.vcf", true)]
+    #[case("norm -m- in.vcf", true)]
+    #[case("norm --multiallelics -any in.vcf", true)]
+    #[case("norm --multiallelics=-both in.vcf", true)]
+    #[case("norm in.vcf -m -any; Date=Wed Nov", true)]
+    #[case("norm -m +any in.vcf", false)]
+    #[case("norm -m+any in.vcf", false)]
+    #[case("norm --multiallelics=+both in.vcf", false)]
+    #[case("norm -d exact in.vcf", false)]
+    #[case("norm -f ref.fa -o split-m-any.vcf in.vcf", false)]
+    #[case("norm --multi-overlaps . in.vcf", false)]
+    fn a_norm_command_splits_only_with_a_minus(#[case] command: &str, #[case] expected: bool) {
+        assert_eq!(splits_multiallelics(command), expected);
+    }
+
+    fn lines(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(ToString::to_string).collect()
+    }
+
+    #[rstest]
+    #[case(&["##VEP-command-line='vep'", "##bcftools_normCommand=norm -m -any x"], true)]
+    #[case(
+        &["##bcftools_normCommand=norm -f r", "##VEP-command-line='vep'", "##bcftools_normCommand=norm -m-any x"],
+        true
+    )]
+    #[case(&["##bcftools_normCommand=norm -m -any x", "##VEP-command-line='vep'"], false)]
+    #[case(&["##VEP-command-line='vep'", "##bcftools_normCommand=norm -d exact x"], false)]
+    #[case(&["##VEP-command-line='vep'", "##bcftools_viewCommand=view -m -any x"], false)]
+    #[case(&["##bcftools_normCommand=norm -m -any x"], false)]
+    #[case(&[], false)]
+    fn only_a_split_after_vep_counts(#[case] header: &[&str], #[case] expected: bool) {
+        assert_eq!(split_after_vep(&lines(header)), expected);
+    }
+
+    #[rstest]
+    #[case("'vep --cache --minimal --offline'", true)]
+    #[case("'vep --cache --minimal'", true)]
+    #[case("'--minimal --cache'", true)]
+    #[case("\"vep --minimal\"", true)]
+    #[case("vep --minimal", true)]
+    #[case("'vep --cache --custom [PATH]/x--minimal.vcf,a,vcf'", false)]
+    #[case("'vep --cache --plugin [PATH]/--minimal'", false)]
+    #[case("'vep --minimal_output'", false)]
+    #[case("'vep --cache'", false)]
+    fn minimal_is_a_whole_token(#[case] command_line: &str, #[case] expected: bool) {
+        assert_eq!(names_minimal(command_line), expected);
+    }
+
+    #[test]
+    fn a_nan_float_reads_as_missing() {
+        assert_eq!(float_at(Some(&SampleValue::Float(f32::NAN)), 0), None);
+        assert_eq!(float_at(Some(&SampleValue::Float(0.5)), 0), Some(0.5));
+        let array = SampleValue::Array(SampleArray::Float(vec![Some(f32::NAN), Some(0.5), None]));
+        assert_eq!(float_at(Some(&array), 0), None);
+        assert_eq!(float_at(Some(&array), 1), Some(0.5));
+    }
 
     #[test]
     fn partial_files_keep_the_whole_output_name() {

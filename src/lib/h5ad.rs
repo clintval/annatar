@@ -21,18 +21,8 @@ pub enum UnsValue {
     List(Vec<String>),
 }
 
-pub const X_ENCODING: [&str; 4] = [
-    "not stored: no genotype",
-    "1: no copies of this ALT",
-    "2: one copy of this ALT",
-    "3: two or more copies of this ALT",
-];
-
-pub const LAYER_ENCODING: [&str; 3] = [
-    "not stored: cell not covered, or an integer value missing at a covered cell",
-    "0: a measured zero",
-    "NaN: a float value missing at a covered cell",
-];
+pub const X_ENCODING: &str =
+    "number of copies of this ALT in the called genotype; hom-ref and uncalled are not stored";
 
 pub struct Output {
     pub obs_names: Vec<String>,
@@ -167,16 +157,13 @@ mod tests {
             layers: vec![
                 (
                     "AD_alt".into(),
-                    LayerMatrix::I32(csr(&[(0, 0, 0i32), (2, 1, 5)])),
+                    LayerMatrix::I32(csr(&[(0, 0, 2i32), (2, 1, 5)])),
                 ),
-                ("VAF".into(), LayerMatrix::F32(csr(&[(0, 0, f32::NAN)]))),
+                ("VAF".into(), LayerMatrix::F32(csr(&[(0, 0, 0.5f32)]))),
             ],
             uns: vec![
                 ("source_vcf".into(), UnsValue::Text("in.vcf".into())),
-                (
-                    "x_encoding".into(),
-                    UnsValue::List(X_ENCODING.iter().map(|s| (*s).to_string()).collect()),
-                ),
+                ("x_encoding".into(), UnsValue::Text(X_ENCODING.into())),
             ],
         };
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/python/out");

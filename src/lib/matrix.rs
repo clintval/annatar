@@ -88,34 +88,41 @@ impl SparseBuilder {
         }
     }
 
-    /// `rows` must be sorted and unique.
+    /// Rows must ascend within a column.
+    pub fn push_copies(&mut self, row: u32, copies: i8) {
+        if copies > 0 {
+            self.x.push(row, copies);
+        }
+    }
+
+    /// Rows must ascend within a column. A missing value counts only at a cell with reads.
     ///
     /// # Panics
-    /// Panics if `x` is not as long as `rows`, `cells` does not match the layers, or a cell's
-    /// kind differs from its layer's.
-    pub fn push_column(&mut self, rows: &[u32], x: &[Option<i8>], cells: &[Vec<Cell>]) {
-        assert_eq!(x.len(), rows.len(), "one X code per row");
-        assert_eq!(cells.len(), self.layers.len(), "one cell vector per layer");
-        for (&row, code) in rows.iter().zip(x) {
-            if let Some(code) = code {
-                self.x.push(row, *code);
-            }
-        }
-        self.x.end_column();
-        for (layer, column) in self.layers.iter_mut().zip(cells) {
-            assert_eq!(column.len(), rows.len(), "one cell per row");
-            for (&row, cell) in rows.iter().zip(column) {
-                match (&mut layer.columns, cell) {
-                    (LayerColumns::Int(c), Cell::Int(Some(v))) => c.push(row, *v),
-                    (LayerColumns::Float(c), Cell::Float(Some(v))) => c.push(row, *v),
-                    (LayerColumns::Int(_), Cell::Int(None)) => layer.missing += 1,
-                    (LayerColumns::Float(c), Cell::Float(None)) => {
-                        c.push(row, f32::NAN);
-                        layer.missing += 1;
-                    }
-                    _ => panic!("cell kind does not match layer {}", layer.name),
+    /// Panics if a cell's kind differs from its layer's.
+    pub fn push_cell(&mut self, layer: usize, row: u32, cell: Cell, has_reads: bool) {
+        let layer = &mut self.layers[layer];
+        match (&mut layer.columns, cell) {
+            (LayerColumns::Int(c), Cell::Int(Some(value))) => {
+                if value != 0 {
+                    c.push(row, value);
                 }
             }
+            (LayerColumns::Float(c), Cell::Float(Some(value))) => {
+                if value != 0.0 {
+                    c.push(row, value);
+                }
+            }
+            (LayerColumns::Int(_), Cell::Int(None))
+            | (LayerColumns::Float(_), Cell::Float(None)) => {
+                layer.missing += u64::from(has_reads);
+            }
+            _ => panic!("cell kind does not match layer {}", layer.name),
+        }
+    }
+
+    pub fn end_column(&mut self) {
+        self.x.end_column();
+        for layer in &mut self.layers {
             match &mut layer.columns {
                 LayerColumns::Int(c) => c.end_column(),
                 LayerColumns::Float(c) => c.end_column(),
@@ -160,45 +167,82 @@ mod tests {
         Some(r.values()[at])
     }
 
+    fn int_cell(value: i32) -> Cell {
+        Cell::Int(Some(value))
+    }
+
     #[test]
-    fn sparse_builder_keeps_explicit_zeros() {
+    fn sparse_builder_stores_only_nonzero_counts() {
         let mut b = SparseBuilder::new(3, &int_layers());
-        b.push_column(
-            &[0, 2],
-            &[Some(1), Some(2)],
-            &[vec![Cell::Int(Some(0)), Cell::Int(Some(4))]],
-        );
+        b.push_cell(0, 0, int_cell(0), true);
+        b.push_cell(0, 2, int_cell(4), true);
+        b.end_column();
         let m = b.finish();
         let LayerMatrix::I32(ad) = &m.layers[0].1 else {
             panic!("wrong kind")
         };
-        assert_eq!(ad.nnz(), 2);
-        assert_eq!(csr_entry(ad, 0, 0), Some(0));
+        assert_eq!(ad.nnz(), 1);
+        assert_eq!(csr_entry(ad, 0, 0), None);
         assert_eq!(csr_entry(ad, 2, 0), Some(4));
-        assert_eq!(csr_entry(ad, 1, 0), None);
-        assert_eq!(m.x.nnz(), 2);
         assert_eq!(m.missing.len(), 0);
     }
 
     #[test]
-    #[should_panic(expected = "one X code per row")]
-    fn x_codes_must_match_rows() {
-        let mut b = SparseBuilder::new(3, &int_layers());
-        b.push_column(
-            &[0, 2],
-            &[Some(1)],
-            &[vec![Cell::Int(None), Cell::Int(None)]],
-        );
+    fn a_zero_float_is_not_stored() {
+        let mut b = SparseBuilder::new(2, &[("AF".to_string(), Kind::Float)]);
+        b.push_cell(0, 0, Cell::Float(Some(0.0)), true);
+        b.push_cell(0, 1, Cell::Float(Some(0.5)), true);
+        b.end_column();
+        let m = b.finish();
+        let LayerMatrix::F32(af) = &m.layers[0].1 else {
+            panic!("wrong kind")
+        };
+        assert_eq!(af.nnz(), 1);
+        assert_eq!(csr_entry(af, 1, 0), Some(0.5));
     }
 
     #[test]
-    fn missing_int_is_unstored_and_counted() {
+    fn x_stores_only_copies_above_zero() {
+        let mut b = SparseBuilder::new(3, &int_layers());
+        b.push_copies(0, 0);
+        b.push_copies(1, 1);
+        b.push_copies(2, 2);
+        b.end_column();
+        let m = b.finish();
+        assert_eq!(m.x.nnz(), 2);
+        assert_eq!(csr_entry(&m.x, 0, 0), None);
+        assert_eq!(csr_entry(&m.x, 1, 0), Some(1));
+        assert_eq!(csr_entry(&m.x, 2, 0), Some(2));
+    }
+
+    #[test]
+    fn x_does_not_follow_the_layers() {
         let mut b = SparseBuilder::new(2, &int_layers());
-        b.push_column(
-            &[0, 1],
-            &[Some(1), Some(2)],
-            &[vec![Cell::Int(None), Cell::Int(Some(3))]],
-        );
+        b.push_copies(0, 1);
+        b.push_cell(0, 1, int_cell(3), true);
+        b.end_column();
+        let m = b.finish();
+        assert_eq!(csr_entry(&m.x, 0, 0), Some(1));
+        let LayerMatrix::I32(ad) = &m.layers[0].1 else {
+            panic!("wrong kind")
+        };
+        assert_eq!(csr_entry(ad, 0, 0), None);
+        assert_eq!(csr_entry(ad, 1, 0), Some(3));
+    }
+
+    #[test]
+    #[should_panic(expected = "cell kind does not match layer AD_alt")]
+    fn a_cell_must_match_its_layer() {
+        let mut b = SparseBuilder::new(1, &int_layers());
+        b.push_cell(0, 0, Cell::Float(Some(1.0)), true);
+    }
+
+    #[test]
+    fn a_missing_int_is_unstored_and_counted_at_a_cell_with_reads() {
+        let mut b = SparseBuilder::new(2, &int_layers());
+        b.push_cell(0, 0, Cell::Int(None), true);
+        b.push_cell(0, 1, int_cell(3), true);
+        b.end_column();
         let m = b.finish();
         let LayerMatrix::I32(ad) = &m.layers[0].1 else {
             panic!("wrong kind")
@@ -208,61 +252,37 @@ mod tests {
     }
 
     #[test]
-    fn missing_float_is_nan() {
+    fn a_missing_float_is_unstored_and_counted_at_a_cell_with_reads() {
         let mut b = SparseBuilder::new(1, &[("AF".to_string(), Kind::Float)]);
-        b.push_column(&[0], &[Some(1)], &[vec![Cell::Float(None)]]);
+        b.push_cell(0, 0, Cell::Float(None), true);
+        b.end_column();
         let m = b.finish();
         let LayerMatrix::F32(af) = &m.layers[0].1 else {
             panic!("wrong kind")
         };
-        assert!(csr_entry(af, 0, 0).unwrap().is_nan());
+        assert_eq!(af.nnz(), 0);
         assert_eq!(m.missing, vec![("AF".to_string(), 1)]);
     }
 
     #[test]
-    fn x_only_where_called() {
-        let mut b = SparseBuilder::new(2, &int_layers());
-        b.push_column(
-            &[0, 1],
-            &[None, Some(2)],
-            &[vec![Cell::Int(Some(1)), Cell::Int(Some(1))]],
-        );
-        let m = b.finish();
-        assert_eq!(m.x.nnz(), 1);
-        assert_eq!(csr_entry(&m.x, 1, 0), Some(2));
-    }
-
-    #[test]
-    fn depth_only_cell_is_covered_with_missing_alt() {
-        let ad = [Some(5), None];
-        assert!(crate::genotype::covered(false, &ad));
-        let layers = vec![
-            ("AD_ref".to_string(), Kind::Integer),
-            ("AD_alt".to_string(), Kind::Integer),
-        ];
-        let mut b = SparseBuilder::new(1, &layers);
-        b.push_column(
-            &[0],
-            &[None],
-            &[vec![Cell::Int(Some(5))], vec![Cell::Int(None)]],
-        );
-        let m = b.finish();
-        let LayerMatrix::I32(r) = &m.layers[0].1 else {
-            panic!("wrong kind")
-        };
-        assert_eq!(csr_entry(r, 0, 0), Some(5));
-        assert_eq!(m.missing, vec![("AD_alt".to_string(), 1)]);
+    fn a_missing_value_at_a_cell_with_no_reads_is_not_counted() {
+        let mut b = SparseBuilder::new(1, &int_layers());
+        b.push_cell(0, 0, Cell::Int(None), false);
+        b.end_column();
+        assert_eq!(b.finish().missing.len(), 0);
     }
 
     #[test]
     fn columns_accumulate_across_pushes() {
         let mut b = SparseBuilder::new(2, &int_layers());
-        b.push_column(&[1], &[Some(1)], &[vec![Cell::Int(Some(7))]]);
-        b.push_column(
-            &[0, 1],
-            &[Some(3), Some(2)],
-            &[vec![Cell::Int(Some(8)), Cell::Int(Some(9))]],
-        );
+        b.push_copies(1, 1);
+        b.push_cell(0, 1, int_cell(7), true);
+        b.end_column();
+        b.push_copies(0, 3);
+        b.push_copies(1, 2);
+        b.push_cell(0, 0, int_cell(8), true);
+        b.push_cell(0, 1, int_cell(9), true);
+        b.end_column();
         let m = b.finish();
         assert_eq!((m.x.nrows(), m.x.ncols()), (2, 2));
         assert_eq!(csr_entry(&m.x, 1, 0), Some(1));

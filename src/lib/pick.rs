@@ -8,7 +8,7 @@ use anyhow::{Context, anyhow, bail};
 use flate2::read::MultiGzDecoder;
 use sha2::{Digest, Sha256};
 
-use crate::alleles::{is_breakend, is_structural};
+use crate::alleles::{is_breakend, is_skipped_alt, is_structural};
 use crate::consequence::{UNRANKED, impact_rank, is_up_or_downstream, most_severe};
 use crate::csq::{CsqEntry, CsqIndex};
 
@@ -241,12 +241,19 @@ fn protein_length(entry: &CsqEntry, index: &CsqIndex) -> u64 {
         .unwrap_or(0)
 }
 
+pub const MINIMAL_OUTPUT: &str = "VEP --minimal output is not supported, because its rewritten \
+    alleles cannot be matched to the ALTs; run VEP without --minimal";
+
 #[derive(Clone, Copy, Debug)]
 pub struct AltAllele<'a> {
     pub alt: &'a str,
     pub spelling: &'a str,
     pub number: usize,
-    pub n_alts: usize,
+    pub alts: &'a [String],
+}
+
+fn allele_num(entry: &CsqEntry, index: &CsqIndex) -> Option<usize> {
+    entry.get(index, "ALLELE_NUM")?.parse().ok()
 }
 
 fn numbered_entries(
@@ -255,54 +262,27 @@ fn numbered_entries(
     allele: &AltAllele,
 ) -> Option<Vec<usize>> {
     index.position("ALLELE_NUM")?;
-    let number_of = |entry: &CsqEntry| entry.get(index, "ALLELE_NUM")?.parse::<usize>().ok();
-    if entries
-        .iter()
-        .filter_map(number_of)
-        .any(|n| n > allele.n_alts)
-    {
-        return None;
-    }
-    let numbered = |number: usize| -> Vec<usize> {
+    Some(
         (0..entries.len())
-            .filter(|&i| number_of(&entries[i]) == Some(number))
-            .collect()
-    };
-    let own = numbered(allele.number);
-    Some(if own.is_empty() && is_breakend(allele.alt) {
-        numbered(0)
-    } else {
-        own
-    })
+            .filter(|&i| allele_num(&entries[i], index) == Some(allele.number))
+            .collect(),
+    )
 }
 
-pub fn entries_for_allele(
-    entries: &[CsqEntry],
-    index: &CsqIndex,
-    allele: &AltAllele,
-) -> Vec<usize> {
-    let spelled = || -> Vec<usize> {
-        (0..entries.len())
-            .filter(|&i| {
-                entries[i]
-                    .get(index, "Allele")
-                    .is_some_and(|value| value.eq_ignore_ascii_case(allele.spelling))
-            })
-            .collect()
-    };
-    if !is_structural(allele.alt) && index.position("MINIMISED").is_none() {
-        return spelled();
-    }
-    if let Some(numbered) = numbered_entries(entries, index, allele) {
-        return numbered;
-    }
-    if allele.n_alts == 1 && allele_values(entries, index).len() == 1 {
-        return (0..entries.len()).collect();
-    }
-    spelled()
+fn is_bases(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|base| b"ACGTN".contains(&base))
 }
 
-pub fn allele_values<'a>(entries: &'a [CsqEntry], index: &CsqIndex) -> Vec<&'a str> {
+fn is_reference_side(value: &str) -> bool {
+    (value.starts_with('.') || value.ends_with('.')) && is_bases(value.trim_matches('.'))
+}
+
+fn has_minimal_form(value: &str, alts: &[String]) -> bool {
+    (matches!(value, ".N" | "N.") || value.starts_with(['[', ']']))
+        && !alts.iter().any(|alt| alt.eq_ignore_ascii_case(value))
+}
+
+fn allele_values<'a>(entries: &'a [CsqEntry], index: &CsqIndex) -> Vec<&'a str> {
     let mut values = Vec::new();
     for value in entries
         .iter()
@@ -313,6 +293,102 @@ pub fn allele_values<'a>(entries: &'a [CsqEntry], index: &CsqIndex) -> Vec<&'a s
         }
     }
     values
+}
+
+fn check_not_split(
+    entries: &[CsqEntry],
+    index: &CsqIndex,
+    allele: &AltAllele,
+) -> anyhow::Result<()> {
+    if allele.alts.len() == 1 {
+        let mut named = allele_values(entries, index);
+        named.retain(|value| {
+            !(is_skipped_alt(value) || is_breakend(allele.alt) && is_reference_side(value))
+        });
+        if named.len() > 1 {
+            bail!(
+                "a record with one ALT names the CSQ alleles {}, so it was split after VEP; \
+                annotate after splitting",
+                named.join(", ")
+            );
+        }
+    }
+    let stale = entries
+        .iter()
+        .filter(|entry| !entry.get(index, "Allele").is_some_and(is_skipped_alt))
+        .filter_map(|entry| allele_num(entry, index))
+        .find(|number| *number > allele.alts.len());
+    if let Some(number) = stale {
+        bail!(
+            "ALLELE_NUM {number} is past this record's ALT count of {}, so it was split after \
+            VEP; annotate after splitting",
+            allele.alts.len()
+        );
+    }
+    Ok(())
+}
+
+fn no_entry_message(entries: &[CsqEntry], index: &CsqIndex, allele: &AltAllele) -> String {
+    let AltAllele { alt, spelling, .. } = allele;
+    let values = allele_values(entries, index).join(", ");
+    let spelled = if spelling.eq_ignore_ascii_case(alt) {
+        String::new()
+    } else {
+        format!(", spelled {spelling} by VEP,")
+    };
+    format!(
+        "no CSQ entry for ALT {alt}{spelled} among the Allele values {values}; \
+        annotate after splitting"
+    )
+}
+
+pub fn entries_for_allele(
+    entries: &[CsqEntry],
+    index: &CsqIndex,
+    allele: &AltAllele,
+) -> anyhow::Result<Vec<usize>> {
+    check_not_split(entries, index, allele)?;
+    let with_allele = |keep: &dyn Fn(&str) -> bool| -> Vec<usize> {
+        (0..entries.len())
+            .filter(|&i| entries[i].get(index, "Allele").is_some_and(keep))
+            .collect()
+    };
+    let spelled = || with_allele(&|value| value.eq_ignore_ascii_case(allele.spelling));
+
+    if !is_structural(allele.alt) {
+        let own = spelled();
+        if own.is_empty() {
+            bail!(no_entry_message(entries, index, allele));
+        }
+        return Ok(own);
+    }
+    if !is_breakend(allele.alt) {
+        return Ok(numbered_entries(entries, index, allele).unwrap_or_else(spelled));
+    }
+    let own = spelled();
+    if !own.is_empty() {
+        return Ok(own);
+    }
+    // Spelling failed, so a numbered entry that names a mate belongs to a sibling breakend.
+    let own: Vec<usize> = numbered_entries(entries, index, allele)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&i| {
+            entries[i]
+                .get(index, "Allele")
+                .is_some_and(|value| !value.contains(['[', ']']))
+        })
+        .collect();
+    if !own.is_empty() {
+        return Ok(own);
+    }
+    let rewritten = allele_values(entries, index)
+        .into_iter()
+        .any(|value| has_minimal_form(value, allele.alts));
+    if rewritten {
+        bail!(MINIMAL_OUTPUT);
+    }
+    Ok(with_allele(&is_reference_side))
 }
 
 pub fn pick(entries: &[CsqEntry], candidates: &[usize], ctx: &PickContext) -> Option<Picked> {
@@ -406,6 +482,8 @@ pub fn missing_tie_fields(index: &CsqIndex) -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     const NAMES: [&str; 13] = [
@@ -464,12 +542,16 @@ mod tests {
         }
     }
 
+    fn alts_of(alt: &str, n_alts: usize) -> &'static [String] {
+        Vec::leak(vec![alt.to_string(); n_alts])
+    }
+
     fn spelled(spelling: &str, number: usize) -> AltAllele<'_> {
         AltAllele {
             alt: spelling,
             spelling,
             number,
-            n_alts: 3,
+            alts: alts_of(spelling, 3),
         }
     }
 
@@ -899,14 +981,22 @@ mod tests {
     fn missing_star_entry_is_none() {
         let index = index_without(&[]);
         let rows = entries(&index, &[&[("Consequence", "intron_variant")]]);
-        let found = entries_for_allele(&rows, &index, &spelled("*", 1));
-        assert_eq!(found.len(), 0);
         let ctx = PickContext {
             index: &index,
             genes: None,
             mane: None,
         };
-        assert_eq!(pick(&rows, &found, &ctx), None);
+        assert_eq!(pick(&rows, &[], &ctx), None);
+    }
+
+    fn own(rows: &[CsqEntry], index: &CsqIndex, allele: &AltAllele) -> Vec<usize> {
+        entries_for_allele(rows, index, allele).unwrap()
+    }
+
+    fn refused(rows: &[CsqEntry], index: &CsqIndex, allele: &AltAllele) -> String {
+        entries_for_allele(rows, index, allele)
+            .unwrap_err()
+            .to_string()
     }
 
     #[test]
@@ -914,15 +1004,15 @@ mod tests {
         let index = index_without(&[]);
         let mut rows = entries(&index, &[&[("Consequence", "intron_variant")][..]; 3]);
         rows[1].values[0] = "-".to_string();
-        assert_eq!(entries_for_allele(&rows, &index, &spelled("T", 1)), [0, 2]);
-        assert_eq!(entries_for_allele(&rows, &index, &spelled("-", 2)), [1]);
+        assert_eq!(own(&rows, &index, &spelled("T", 1)), [0, 2]);
+        assert_eq!(own(&rows, &index, &spelled("-", 2)), [1]);
     }
 
     #[test]
     fn entries_for_allele_ignores_case() {
         let index = index_without(&[]);
         let rows = entries(&index, &[&[("Consequence", "intron_variant")]]);
-        assert_eq!(entries_for_allele(&rows, &index, &spelled("t", 1)), [0]);
+        assert_eq!(own(&rows, &index, &spelled("t", 1)), [0]);
     }
 
     fn names(names: &[&str]) -> CsqIndex {
@@ -950,91 +1040,200 @@ mod tests {
             alt,
             spelling,
             number,
-            n_alts,
+            alts: alts_of(alt, n_alts),
         }
     }
 
     #[test]
-    fn a_sequence_alt_matches_on_spelling_and_never_on_a_stale_number() {
+    fn a_sequence_alt_matches_on_spelling_and_never_on_a_number() {
         let index = names(&["Allele", "ALLELE_NUM"]);
-        let rows = allele_rows(&index, &[("A", "1"), ("T", "2")]);
-        assert_eq!(entries_for_allele(&rows, &index, &alt("T", "T", 1, 1)), [1]);
+        let rows = allele_rows(&index, &[("A", "2"), ("T", "1")]);
+        assert_eq!(own(&rows, &index, &alt("A", "A", 1, 2)), [0]);
     }
 
     #[test]
-    fn a_sequence_alt_does_not_take_a_lone_entry_of_another_allele() {
+    fn a_sequence_alt_with_no_entry_stops_naming_what_vep_wrote() {
         let index = names(&["Allele", "ALLELE_NUM"]);
         let rows = allele_rows(&index, &[("A", "1")]);
         assert_eq!(
-            entries_for_allele(&rows, &index, &alt("T", "T", 1, 1)).len(),
-            0
+            refused(&rows, &index, &alt("T", "T", 1, 1)),
+            "no CSQ entry for ALT T among the Allele values A; annotate after splitting"
         );
     }
 
     #[test]
-    fn minimised_output_numbers_a_sequence_alt() {
-        let index = names(&["Allele", "ALLELE_NUM", "MINIMISED"]);
-        let rows = allele_rows(&index, &[("T", "2"), ("-", "1")]);
+    fn the_no_entry_error_shows_vep_spelling_when_it_differs() {
+        let index = index_without(&[]);
+        let rows = allele_rows(&index, &[("AT", "")]);
         assert_eq!(
-            entries_for_allele(&rows, &index, &alt("ATT", "TT", 2, 3)),
-            [0]
+            refused(&rows, &index, &alt("AT", "T", 1, 1)),
+            "no CSQ entry for ALT AT, spelled T by VEP, among the Allele values AT; \
+            annotate after splitting"
         );
     }
 
     #[test]
-    fn minimised_output_with_no_numbers_keeps_one_named_allele_on_a_single_alt() {
+    fn a_sequence_alt_refuses_minimised_spellings_with_or_without_the_subfield() {
         let index = names(&["Allele", "MINIMISED"]);
         let rows = allele_rows(&index, &[("T", ""), ("T", "")]);
+        assert!(refused(&rows, &index, &alt("CT", "CT", 1, 1)).starts_with("no CSQ entry"));
+    }
+
+    #[rstest]
+    #[case(&[("CT", ""), ("T", "")], "CT", "T", "CT, T")]
+    #[case(&[("A", ""), ("T", "")], "A", "A", "A, T")]
+    #[case(&[("deletion", ""), ("inversion", "")], "<DEL>", "deletion", "deletion, inversion")]
+    fn a_record_with_one_alt_and_two_named_alleles_stops(
+        #[case] rows: &[(&str, &str)],
+        #[case] vcf_alt: &str,
+        #[case] spelling: &str,
+        #[case] alleles: &str,
+    ) {
+        let index = index_without(&[]);
+        let rows = allele_rows(&index, rows);
         assert_eq!(
-            entries_for_allele(&rows, &index, &alt("CT", "CT", 1, 1)),
-            [0, 1]
+            refused(&rows, &index, &alt(vcf_alt, spelling, 1, 1)),
+            format!(
+                "a record with one ALT names the CSQ alleles {alleles}, so it was split after \
+                VEP; annotate after splitting"
+            )
         );
     }
 
     #[test]
-    fn minimised_output_with_two_alleles_falls_to_spelling() {
-        let index = names(&["Allele", "MINIMISED"]);
-        let rows = allele_rows(&index, &[("T", ""), ("G", "")]);
-        assert_eq!(entries_for_allele(&rows, &index, &alt("A", "G", 1, 1)), [1]);
+    fn two_named_alleles_are_fine_on_a_record_with_two_alts() {
+        let index = index_without(&[]);
+        let rows = allele_rows(&index, &[("CT", ""), ("T", "")]);
+        assert_eq!(own(&rows, &index, &alt("T", "T", 2, 2)), [1]);
     }
 
     #[test]
-    fn a_structural_number_counts_skipped_alts() {
-        let index = names(&["Allele", "ALLELE_NUM"]);
-        let rows = allele_rows(&index, &[("deletion", "1"), ("deletion", "2")]);
-        assert_eq!(
-            entries_for_allele(&rows, &index, &alt("<DEL>", "deletion", 2, 2)),
-            [1]
-        );
+    fn a_breakend_reference_side_does_not_count_as_a_named_allele() {
+        let index = index_without(&[]);
+        let rows = allele_rows(&index, &[("C.", ""), ("C[chr1:5[", "")]);
+        let allele = alt("C[chr1:5[", "C[chr1:5[", 1, 1);
+        assert_eq!(own(&rows, &index, &allele), [1]);
     }
 
     #[test]
-    fn a_structural_alt_with_no_number_of_its_own_matches_nothing() {
-        let index = names(&["Allele", "ALLELE_NUM"]);
-        let rows = allele_rows(&index, &[("deletion", "1"), ("deletion", "0")]);
-        assert_eq!(
-            entries_for_allele(&rows, &index, &alt("<DEL>", "deletion", 2, 2)).len(),
-            0
-        );
-    }
-
-    #[test]
-    fn numbers_past_the_alt_count_are_ignored() {
+    fn a_breakend_split_after_vep_stops_on_its_mates() {
         let index = names(&["Allele", "ALLELE_NUM"]);
         let rows = allele_rows(
             &index,
             &[("C.", "0"), ("C[chr1:5[", "1"), ("C[chr1:6[", "2")],
         );
         let allele = alt("C[chr1:6[", "C[chr1:6[", 1, 1);
-        assert_eq!(entries_for_allele(&rows, &index, &allele), [2]);
+        assert!(refused(&rows, &index, &allele).contains("C[chr1:5[, C[chr1:6["));
     }
 
     #[test]
-    fn a_breakend_with_no_entry_for_its_number_keeps_the_reference_side() {
+    fn a_structural_number_counts_skipped_alts() {
         let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("deletion", "1"), ("deletion", "2")]);
+        assert_eq!(own(&rows, &index, &alt("<DEL>", "deletion", 2, 2)), [1]);
+    }
+
+    #[test]
+    fn a_number_matches_a_symbolic_allele_the_port_cannot_spell() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("short_tandem_repeat", "1")]);
+        assert_eq!(own(&rows, &index, &alt("<STR4>", "<STR4>", 1, 1)), [0]);
+    }
+
+    #[test]
+    fn a_symbolic_alt_with_no_number_of_its_own_matches_nothing() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("deletion", "1"), ("deletion", "0")]);
+        let allele = alt("<DEL>", "deletion", 2, 2);
+        assert_eq!(own(&rows, &index, &allele).len(), 0);
+    }
+
+    #[test]
+    fn a_symbolic_alt_the_port_cannot_spell_matches_nothing_without_numbers() {
+        let index = index_without(&[]);
+        let rows = allele_rows(&index, &[("copy_number_variation", "")]);
+        let allele = alt("<STR4>", "<STR4>", 1, 1);
+        assert_eq!(own(&rows, &index, &allele).len(), 0);
+    }
+
+    #[rstest]
+    #[case("CT", "T")]
+    #[case("<INV>", "inversion")]
+    #[case("C[chr1:5[", "C[chr1:5[")]
+    fn a_number_past_the_alt_count_stops_on_every_alt(
+        #[case] vcf_alt: &str,
+        #[case] spelling: &str,
+    ) {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[(spelling, "2")]);
+        assert_eq!(
+            refused(&rows, &index, &alt(vcf_alt, spelling, 1, 1)),
+            "ALLELE_NUM 2 is past this record's ALT count of 1, so it was split after VEP; \
+            annotate after splitting"
+        );
+    }
+
+    #[test]
+    fn a_sibling_number_within_the_alt_count_leaves_no_evidence() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("T", "1")]);
+        assert_eq!(own(&rows, &index, &alt("CT", "T", 1, 1)), [0]);
+    }
+
+    #[rstest]
+    #[case("<*>")]
+    #[case("<NON_REF>")]
+    fn a_placeholder_is_left_out_of_the_split_evidence(#[case] placeholder: &str) {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("T", "1"), (placeholder, "2")]);
+        assert_eq!(own(&rows, &index, &alt("T", "T", 1, 1)), [0]);
+        let index = index_without(&[]);
+        let rows = allele_rows(&index, &[("T", ""), (placeholder, "")]);
+        assert_eq!(own(&rows, &index, &alt("T", "T", 1, 1)), [0]);
+    }
+
+    #[test]
+    fn a_breakend_matches_its_string_before_its_number() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("C[chr1:5[", "2"), ("C[chr1:6[", "1")]);
+        let allele = alt("C[chr1:5[", "C[chr1:5[", 1, 2);
+        assert_eq!(own(&rows, &index, &allele), [0]);
+    }
+
+    #[test]
+    fn a_breakend_does_not_take_a_sibling_mate_by_number() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("C[chr1:5[", "1")]);
+        let allele = alt("C[chr1:6[", "C[chr1:6[", 1, 1);
+        assert_eq!(own(&rows, &index, &allele).len(), 0);
+    }
+
+    #[test]
+    fn a_breakend_with_a_numbered_entry_that_names_no_mate_keeps_it() {
+        let index = names(&["Allele", "ALLELE_NUM"]);
+        let rows = allele_rows(&index, &[("chromosome_breakpoint", "1")]);
+        let allele = alt("C.", "C.", 1, 1);
+        assert_eq!(own(&rows, &index, &allele), [0]);
+    }
+
+    #[rstest]
+    #[case(&["Allele", "ALLELE_NUM"])]
+    #[case(&["Allele"])]
+    fn a_breakend_with_no_entry_of_its_own_keeps_the_reference_side(#[case] fields: &[&str]) {
+        let index = names(fields);
         let rows = allele_rows(&index, &[("C.", "0"), ("C.", "0")]);
         let allele = alt("C[chr9:5[", "C[chr9:5[", 1, 1);
-        assert_eq!(entries_for_allele(&rows, &index, &allele), [0, 1]);
+        assert_eq!(own(&rows, &index, &allele), [0, 1]);
+    }
+
+    #[rstest]
+    #[case(&["Allele", "ALLELE_NUM"])]
+    #[case(&["Allele"])]
+    fn the_reference_side_fallback_serves_any_record(#[case] fields: &[&str]) {
+        let index = names(fields);
+        let rows = allele_rows(&index, &[("C.", "0"), ("C[chr1:5[", "1")]);
+        let allele = alt("C[chr9:5[", "C[chr9:5[", 2, 2);
+        assert_eq!(own(&rows, &index, &allele), [0]);
     }
 
     #[test]
@@ -1042,41 +1241,56 @@ mod tests {
         let index = names(&["Allele", "ALLELE_NUM"]);
         let rows = allele_rows(&index, &[("C.", "0"), ("C[chr1:5[", "1")]);
         let allele = alt("C[chr1:5[", "C[chr1:5[", 1, 1);
-        assert_eq!(entries_for_allele(&rows, &index, &allele), [1]);
+        assert_eq!(own(&rows, &index, &allele), [1]);
     }
 
     #[test]
-    fn a_breakend_with_only_its_reference_side_and_no_numbers_keeps_it() {
+    fn a_breakend_with_nothing_on_either_side_matches_nothing() {
         let index = index_without(&[]);
-        let rows = allele_rows(&index, &[("C.", "")]);
-        let allele = alt("C[chr9:5[", "C[chr9:5[", 1, 1);
-        assert_eq!(entries_for_allele(&rows, &index, &allele), [0]);
-    }
-
-    #[test]
-    fn a_breakend_leaves_out_the_reference_side_by_spelling() {
-        let index = index_without(&[]);
-        let rows = allele_rows(&index, &[("C.", ""), ("C[chr1:5[", "")]);
+        let rows = allele_rows(&index, &[("deletion", "")]);
         let allele = alt("C[chr1:5[", "C[chr1:5[", 1, 1);
-        assert_eq!(entries_for_allele(&rows, &index, &allele), [1]);
+        assert_eq!(own(&rows, &index, &allele).len(), 0);
     }
 
-    #[test]
-    fn a_minimal_breakend_with_no_numbers_matches_nothing() {
-        let index = names(&["Allele", "MINIMISED"]);
-        let rows = allele_rows(&index, &[(".N", ""), ("[chr1:5[", "")]);
-        let allele = alt("C[chr1:5[", "C[chr1:5[", 1, 1);
-        assert_eq!(entries_for_allele(&rows, &index, &allele).len(), 0);
-    }
-
-    #[test]
-    fn a_symbolic_alt_on_a_single_alt_record_keeps_one_named_allele() {
+    #[rstest]
+    #[case(&[(".N", ""), ("[chr1:5[", "")])]
+    #[case(&[("]chr1:5]", "")])]
+    #[case(&[(".N", "")])]
+    #[case(&[("N.", "")])]
+    fn a_breakend_with_rewritten_entries_stops_naming_the_flag(#[case] rows: &[(&str, &str)]) {
         let index = index_without(&[]);
-        let rows = allele_rows(&index, &[("copy_number_variation", "")]);
-        assert_eq!(
-            entries_for_allele(&rows, &index, &alt("<STR4>", "<STR4>", 1, 1)),
-            [0]
-        );
+        let rows = allele_rows(&index, rows);
+        let allele = alt("C[chr1:5[", "C[chr1:5[", 1, 1);
+        assert_eq!(refused(&rows, &index, &allele), MINIMAL_OUTPUT);
+    }
+
+    #[rstest]
+    #[case("]chr1:7]C", ".C")]
+    #[case("[chr1:7[C", "C.")]
+    fn a_sibling_alt_is_not_a_rewrite(#[case] sibling: &str, #[case] reference_side: &str) {
+        let index = index_without(&[]);
+        let rows = allele_rows(&index, &[(reference_side, ""), (sibling, "")]);
+        let alts = vec!["C[chr2:5[".to_string(), sibling.to_string()];
+        let allele = AltAllele {
+            alt: "C[chr2:5[",
+            spelling: "C[chr2:5[",
+            number: 1,
+            alts: &alts,
+        };
+        assert_eq!(own(&rows, &index, &allele), [0]);
+    }
+
+    #[rstest]
+    #[case("C.", true)]
+    #[case(".N", true)]
+    #[case("ACGT.", true)]
+    #[case("C", false)]
+    #[case(".", false)]
+    #[case("", false)]
+    #[case("C[chr1:5[", false)]
+    #[case("deletion", false)]
+    fn the_reference_side_is_bases_and_a_dot(#[case] value: &str, #[case] expected: bool) {
+        assert_eq!(is_reference_side(value), expected);
     }
 
     #[test]

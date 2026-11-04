@@ -38,24 +38,18 @@ const CARGO_STYLING: Styles = Styles::styled()
 /// Convert a multi-sample VCF of single cells into an h5ad.
 ///
 /// Each VCF sample becomes a cell in `obs` and each ALT allele a variant in
-/// `var`. `X` holds a genotype code per cell and variant, and numeric FORMAT
-/// fields become sparse layers. VEP annotation is optional: with `INFO/CSQ`,
-/// one consequence is picked per ALT and becomes typed `var` columns.
-/// The file is written once the whole VCF has been read, so a failed run
-/// leaves no output.
-///
-/// X
-///
-///   not stored  no genotype
-///   1           no copies of this ALT
-///   2           one copy of this ALT
-///   3           two or more copies of this ALT
+/// `var`. `X` holds the number of copies of this ALT in the called genotype;
+/// hom-ref and uncalled are not stored. Numeric FORMAT fields become sparse
+/// layers of plain counts, with zeros and missing values not stored.
+/// VEP annotation is optional: with `INFO/CSQ`, one consequence is picked per
+/// ALT and becomes typed `var` columns. The file is written once the whole VCF
+/// has been read, so a failed run leaves no output.
 ///
 /// EXAMPLES
 ///
-///   annatar --output 'cells.h5ad' 'cells.vcf.gz'
-///   annatar --genes 'panel-genes.txt' --output 'cells.h5ad' 'cells.vep.vcf.gz'
-///   bcftools view 'cells.bcf' | annatar --output 'cells.h5ad'
+///   annatar 'cells.vcf.gz' 'cells.h5ad'
+///   annatar --genes 'panel-genes.txt' 'cells.vep.vcf.gz' 'cells.h5ad'
+///   bcftools view 'cells.bcf' | annatar - 'cells.h5ad'
 #[derive(Debug, Parser)]
 #[command(
     author,
@@ -67,13 +61,11 @@ const CARGO_STYLING: Styles = Styles::styled()
 #[clap(styles = CARGO_STYLING)]
 struct Cli {
     /// Input VCF or BCF, plain or bgzipped, or `-` for standard input.
-    #[arg(value_name = "VCF", default_value = "-", verbatim_doc_comment)]
+    #[arg(value_name = "VCF", verbatim_doc_comment)]
     input: PathBuf,
 
     /// Output h5ad. HDF5 cannot stream, so this must be a path.
     #[arg(
-        short = 'o',
-        long,
         value_name = "H5AD",
         value_parser = OsStringValueParser::new().try_map(output_path),
         verbatim_doc_comment

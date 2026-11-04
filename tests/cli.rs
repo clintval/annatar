@@ -34,9 +34,8 @@ fn converts_basic() {
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("--output")
-        .arg(&output)
         .arg(data("basic.vcf"))
+        .arg(&output)
         .assert()
         .success();
     assert!(output.exists());
@@ -47,9 +46,8 @@ fn reads_stdin() {
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg("-")
+        .arg(&output)
         .write_stdin(fs::read(data("basic.vcf")).unwrap())
         .assert()
         .success();
@@ -58,16 +56,32 @@ fn reads_stdin() {
 }
 
 #[test]
-fn stdin_is_the_default_input() {
+fn both_paths_are_required() {
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("-o")
         .arg(&output)
         .write_stdin(fs::read(data("basic.vcf")).unwrap())
         .assert()
-        .success();
-    assert!(output.exists());
+        .failure()
+        .stderr(contains("<H5AD>"));
+    assert!(!output.exists());
+}
+
+#[rstest]
+#[case("--output")]
+#[case("-o")]
+fn the_output_flags_are_gone(#[case] flag: &str) {
+    let dir = TempDir::new().unwrap();
+    let output = output_in(&dir);
+    annatar()
+        .arg(flag)
+        .arg(&output)
+        .arg(data("basic.vcf"))
+        .assert()
+        .failure()
+        .stderr(contains(format!("unexpected argument '{flag}'")));
+    assert!(!output.exists());
 }
 
 #[test]
@@ -75,10 +89,9 @@ fn threads_read_a_bgzipped_input() {
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("-o")
-        .arg(&output)
         .args(["-@", "2"])
         .arg(data("basic.vcf.gz"))
+        .arg(&output)
         .assert()
         .success();
     assert_eq!(open(&output).n_vars(), 5);
@@ -96,9 +109,8 @@ fn plain_gzip_input_is_refused_with_advice() {
     encoder.finish().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("--output")
-        .arg(&output)
         .arg(&input)
+        .arg(&output)
         .assert()
         .failure()
         .stderr(contains(
@@ -112,9 +124,8 @@ fn no_records_writes_empty_matrix() {
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("no-records.vcf"))
+        .arg(&output)
         .assert()
         .success();
     let adata = open(&output);
@@ -127,9 +138,8 @@ fn symbolic_alts_are_skipped() {
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("symbolic.vcf"))
+        .arg(&output)
         .assert()
         .success()
         .stderr(contains("*, <*> and <NON_REF> ALT alleles skipped: 3").count(1));
@@ -146,9 +156,8 @@ fn a_structural_alt_with_no_entry_keeps_its_row_and_warns_once() {
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("structural-no-entry.vcf"))
+        .arg(&output)
         .assert()
         .success()
         .stderr(contains("symbolic or breakend ALT alleles with no CSQ entry: 2").count(1));
@@ -160,47 +169,83 @@ fn a_structural_alt_with_no_entry_keeps_its_row_and_warns_once() {
 #[case("no-csq-entry-allele-number.vcf")]
 #[case("split-after-vep.vcf")]
 #[case("split-after-vep-allele-number.vcf")]
+#[case("split-collide.vcf")]
 #[case("pick-then-split.vcf")]
 #[case("single-alt-mismatch.vcf")]
-fn allele_number_is_not_suggested_where_it_would_not_help(#[case] name: &str) {
+fn no_error_suggests_allele_number(#[case] name: &str) {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("errors").join(name))
+        .arg(output_in(&dir))
         .assert()
         .failure()
         .stderr(contains("--allele_number").not());
 }
 
-#[test]
-fn a_minimal_breakend_with_no_number_keeps_an_empty_row_and_warns_once() {
+#[rstest]
+#[case("errors/minimal-subfield.vcf")]
+#[case("errors/minimal-command-line.vcf")]
+fn excluding_info_csq_lets_minimal_output_through(#[case] name: &str) {
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("-o")
+        .args(["--exclude-field", "INFO/CSQ"])
+        .arg(data(name))
         .arg(&output)
-        .arg(data("minimal-no-number.vcf"))
+        .assert()
+        .success();
+    assert_eq!(open(&output).n_vars(), 1);
+}
+
+#[test]
+fn excluding_info_csq_lets_a_split_header_through() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .args(["--exclude-field", "INFO/CSQ"])
+        .arg(data("errors/split-norm-line.vcf"))
+        .arg(output_in(&dir))
+        .assert()
+        .success();
+}
+
+#[test]
+fn a_split_breakend_does_not_take_its_sibling_by_number() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg(data("pick-split-breakend.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(contains("symbolic or breakend ALT alleles with no CSQ entry: 1").count(1));
-    assert_eq!(open(&output).n_vars(), 3);
+}
+
+#[test]
+fn a_path_holding_the_flag_is_not_minimal_output() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg(data("minimal-in-a-path.vcf"))
+        .arg(output_in(&dir))
+        .assert()
+        .success();
 }
 
 #[rstest]
 #[case("symbolic-csq.vcf")]
 #[case("breakend-csq.vcf")]
 #[case("breakend-reference-side.vcf")]
+#[case("breakend-reference-side-no-number.vcf")]
 #[case("allele-number.vcf")]
 #[case("allele-spelling.vcf")]
-#[case("split-after-vep-snv.vcf")]
-#[case("split-after-vep-breakend.vcf")]
+#[case("gvcf-split.vcf")]
+#[case("mixed-placement-breakends.vcf")]
+#[case("norm-before-vep.vcf")]
+#[case("norm-without-split.vcf")]
+#[case("norm-join-after-vep.vcf")]
 fn alleles_vep_spells_its_own_way_match_without_warning(#[case] name: &str) {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data(name))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(contains("no CSQ entry").not());
@@ -250,13 +295,30 @@ fn alleles_vep_spells_its_own_way_match_without_warning(#[case] name: &str) {
 #[case(
     "split-after-vep.vcf",
     "chr1:100",
-    "no CSQ entry for ALT AT, spelled T by VEP, among the Allele values G, AT; \
+    "a record with one ALT names the CSQ alleles G, AT, so it was split after VEP; \
      annotate after splitting"
 )]
 #[case(
     "split-after-vep-allele-number.vcf",
     "chr1:100",
-    "no CSQ entry for ALT AT, spelled T by VEP, among the Allele values G, AT; \
+    "a record with one ALT names the CSQ alleles G, AT, so it was split after VEP; \
+     annotate after splitting"
+)]
+#[case(
+    "split-after-vep-snv.vcf",
+    "chr1:100",
+    "a record with one ALT names the CSQ alleles A, T, so it was split after VEP; \
+     annotate after splitting"
+)]
+#[case(
+    "split-after-vep-breakend.vcf",
+    "chr1:100",
+    "a record with one ALT names the CSQ alleles C[chr1:901[, C[chr1:902[, so it was split"
+)]
+#[case(
+    "split-collide.vcf",
+    "chr1:100",
+    "a record with one ALT names the CSQ alleles CT, T, so it was split after VEP; \
      annotate after splitting"
 )]
 #[case(
@@ -265,15 +327,36 @@ fn alleles_vep_spells_its_own_way_match_without_warning(#[case] name: &str) {
     "no CSQ entry for ALT T among the Allele values A; annotate after splitting"
 )]
 #[case(
+    "split-stale-number.vcf",
+    "chr1:100",
+    "ALLELE_NUM 2 is past this record's ALT count of 1, so it was split after VEP; \
+     annotate after splitting"
+)]
+#[case(
+    "split-norm-line.vcf",
+    "",
+    "the header shows bcftools norm splitting multiallelics after VEP; annotate after splitting"
+)]
+#[case(
+    "split-norm-line-interleaved.vcf",
+    "",
+    "the header shows bcftools norm splitting multiallelics after VEP; annotate after splitting"
+)]
+#[case(
     "single-alt-mismatch.vcf",
     "chr1:100",
     "no CSQ entry for ALT G among the Allele values T; annotate after splitting"
 )]
+#[case("minimal-subfield.vcf", "", "VEP --minimal output is not supported")]
 #[case(
-    "minimal-multiallelic.vcf",
+    "minimal-command-line.vcf",
+    "",
+    "VEP --minimal output is not supported"
+)]
+#[case(
+    "minimal-breakend.vcf",
     "chr1:100",
-    "no CSQ entry for ALT ATT, spelled TT by VEP, among the Allele values -, T; \
-     annotate after splitting, or with VEP's --allele_number for multiallelic --minimal output"
+    "VEP --minimal output is not supported"
 )]
 #[case(
     "layer-collides-with-ad.vcf",
@@ -357,9 +440,8 @@ fn an_error_input_fails_naming_the_problem_and_writes_nothing(
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("errors").join(name))
+        .arg(&output)
         .assert()
         .failure()
         .stderr(contains(locus).and(contains(message)));
@@ -396,10 +478,9 @@ fn an_exclusion_that_cannot_be_honored_is_an_error(
 ) {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .args(["--exclude-field", field])
         .arg(data(name))
+        .arg(output_in(&dir))
         .assert()
         .failure()
         .stderr(contains(message));
@@ -412,9 +493,8 @@ const NO_CSQ_NOTE: &str = "no INFO/CSQ to read, so the variants have no annotati
 fn a_header_with_no_csq_gets_one_info_line_and_no_warning() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("no-csq.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(contains(NO_CSQ_NOTE).count(1).and(contains("WARN").not()));
@@ -424,9 +504,8 @@ fn a_header_with_no_csq_gets_one_info_line_and_no_warning() {
 fn a_header_with_csq_gets_no_note() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("basic.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(contains(NO_CSQ_NOTE).not());
@@ -438,11 +517,10 @@ fn a_header_with_csq_gets_no_note() {
 fn a_lookup_file_warns_when_there_is_no_csq_to_act_on(#[case] flag: &str, #[case] file: &str) {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(flag)
         .arg(data(file))
         .arg(data("no-csq.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(
@@ -459,10 +537,9 @@ fn a_lookup_file_warns_when_there_is_no_csq_to_act_on(#[case] flag: &str, #[case
 fn an_exclusion_of_absent_annotation_warns(#[case] name: &str, #[case] field: &str) {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .args(["--exclude-field", field])
         .arg(data(name))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(
@@ -477,13 +554,12 @@ fn an_exclusion_of_absent_annotation_warns(#[case] name: &str, #[case] field: &s
 fn excluding_info_csq_acts_as_a_header_with_no_csq() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .args(["--exclude-field", "INFO/CSQ"])
         .args(["--exclude-field", "INFO/CSQ/no_such_subfield"])
         .arg("--genes")
         .arg(data("panel-genes.txt"))
         .arg(data("basic.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(
@@ -499,10 +575,9 @@ fn excluding_info_csq_acts_as_a_header_with_no_csq() {
 fn excluding_info_csq_allows_a_csq_header_with_no_format_list() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .args(["--exclude-field", "INFO/CSQ"])
         .arg(data("errors/csq-no-format.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success();
 }
@@ -511,10 +586,9 @@ fn excluding_info_csq_allows_a_csq_header_with_no_format_list() {
 fn a_malformed_exclude_field_is_an_error() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .args(["--exclude-field", "SYMBOL"])
         .arg(data("basic.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .failure()
         .stderr(contains("expected INFO/ID, FORMAT/ID or INFO/CSQ/subfield"));
@@ -527,11 +601,10 @@ fn a_missing_lookup_file_is_an_error_naming_the_path(#[case] flag: &str, #[case]
     let dir = TempDir::new().unwrap();
     let missing = dir.path().join(file);
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(flag)
         .arg(&missing)
         .arg(data("basic.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .failure()
         .stderr(contains(missing.display().to_string()));
@@ -542,9 +615,8 @@ fn an_unwritable_output_is_an_error_naming_the_path() {
     let dir = TempDir::new().unwrap();
     let output = dir.path().join("no-such-directory").join("out.h5ad");
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("basic.vcf"))
+        .arg(&output)
         .assert()
         .failure()
         .stderr(contains(output.display().to_string()));
@@ -556,9 +628,8 @@ fn a_failed_run_keeps_an_earlier_output() {
     let output = output_in(&dir);
     fs::write(&output, "earlier").unwrap();
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("errors/ad-length.vcf"))
+        .arg(&output)
         .assert()
         .failure();
     assert_eq!(fs::read_to_string(&output).unwrap(), "earlier");
@@ -570,9 +641,8 @@ fn a_successful_run_replaces_an_earlier_output() {
     let output = output_in(&dir);
     fs::write(&output, "earlier").unwrap();
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("basic.vcf"))
+        .arg(&output)
         .assert()
         .success();
     assert_eq!(open(&output).n_vars(), 5);
@@ -586,9 +656,8 @@ fn a_failed_write_keeps_an_earlier_output() {
     fs::write(&output, "earlier").unwrap();
     fs::create_dir(dir.path().join("out.h5ad.partial")).unwrap();
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("basic.vcf"))
+        .arg(&output)
         .assert()
         .failure()
         .stderr(contains(output.display().to_string()));
@@ -601,9 +670,8 @@ fn a_failed_rename_leaves_no_partial_file() {
     let output = output_in(&dir);
     fs::create_dir(&output).unwrap();
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("basic.vcf"))
+        .arg(&output)
         .assert()
         .failure()
         .stderr(contains(output.display().to_string()));
@@ -616,9 +684,8 @@ fn output_names_differing_by_suffix_do_not_share_a_partial_file() {
     fs::create_dir(dir.path().join("cells.h5ad.partial")).unwrap();
     let output = dir.path().join("cells.1");
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("basic.vcf"))
+        .arg(&output)
         .assert()
         .success();
     assert_eq!(open(&output).n_vars(), 5);
@@ -629,8 +696,8 @@ fn standard_output_is_refused() {
     let dir = TempDir::new().unwrap();
     annatar()
         .current_dir(dir.path())
-        .args(["-o", "-"])
         .arg(data("basic.vcf"))
+        .arg("-")
         .assert()
         .failure()
         .stderr(contains("HDF5 cannot stream"));
@@ -645,9 +712,8 @@ fn a_non_utf8_path_is_an_ordinary_error() {
 
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(OsStr::from_bytes(b"in\xff.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .code(1)
         .stderr(contains("opening"));
@@ -658,9 +724,8 @@ fn records_with_no_alt_warn_once() {
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("no-alt.vcf"))
+        .arg(&output)
         .assert()
         .success()
         .stderr(contains("records with no ALT skipped: 1").count(1));
@@ -671,11 +736,10 @@ fn records_with_no_alt_warn_once() {
 fn a_mane_table_is_ignored_with_a_warning_when_the_header_declares_mane_fields() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg("--mane-table")
         .arg(data("mane-summary.txt"))
         .arg(data("basic.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(contains("--mane-table is ignored").count(1));
@@ -685,9 +749,8 @@ fn a_mane_table_is_ignored_with_a_warning_when_the_header_declares_mane_fields()
 fn no_gt_warns_once() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("no-gt.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(contains("no FORMAT/GT").count(1));
@@ -697,9 +760,8 @@ fn no_gt_warns_once() {
 fn missing_tie_fields_warn_once_with_csq() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("multiallelic.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(contains("MANE_SELECT").count(1));
@@ -709,9 +771,8 @@ fn missing_tie_fields_warn_once_with_csq() {
 fn missing_tie_fields_stay_quiet_without_csq() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("no-csq.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(contains("MANE_SELECT").not());
@@ -721,21 +782,48 @@ fn missing_tie_fields_stay_quiet_without_csq() {
 fn missing_values_warn_once_per_field() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("missing-ref-count.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
-        .stderr(contains("AD_ref: missing in 1 of the covered cells").count(1));
+        .stderr(contains("AD_ref: missing in 1 of the cells with reads").count(1));
+}
+
+#[test]
+fn missing_values_count_only_at_cells_with_reads() {
+    let dir = TempDir::new().unwrap();
+    annatar()
+        .arg(data("copies.vcf"))
+        .arg(output_in(&dir))
+        .assert()
+        .success()
+        .stderr(
+            contains("DP: missing in 2 of the cells with reads")
+                .count(1)
+                .and(contains("AD_ref: missing").not())
+                .and(contains("AD_alt: missing").not()),
+        );
+}
+
+#[test]
+fn a_missing_alt_count_is_counted_when_the_reads_are_on_another_alt() {
+    let dir = TempDir::new().unwrap();
+    let output = output_in(&dir);
+    annatar()
+        .arg(data("missing-alt-reads-elsewhere.vcf"))
+        .arg(&output)
+        .assert()
+        .success()
+        .stderr(contains("AD_alt: missing in 1 of the cells with reads").count(1));
+    assert_eq!(open(&output).n_vars(), 2);
 }
 
 #[test]
 fn a_value_failing_its_csq_type_warns_once_per_column() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("csq-types-fallback.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(
@@ -752,9 +840,8 @@ fn a_value_failing_its_csq_type_warns_once_per_column() {
 fn an_unranked_consequence_warns_once_per_term() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("unranked-consequence.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(
@@ -769,9 +856,8 @@ fn another_vep_major_warns_once_and_runs() {
     let dir = TempDir::new().unwrap();
     let output = output_in(&dir);
     annatar()
-        .arg("-o")
-        .arg(&output)
         .arg(data("vep-115.vcf"))
+        .arg(&output)
         .assert()
         .success()
         .stderr(contains("annotated by VEP 115").count(1));
@@ -782,9 +868,8 @@ fn another_vep_major_warns_once_and_runs() {
 fn a_header_with_no_vep_line_gets_no_version_warning() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("multiallelic.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(contains("annotated by VEP").not());
@@ -794,9 +879,8 @@ fn a_header_with_no_vep_line_gets_no_version_warning() {
 fn a_clean_run_has_no_warnings() {
     let dir = TempDir::new().unwrap();
     annatar()
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("basic.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .success()
         .stderr(contains("WARN").not());
@@ -822,7 +906,7 @@ fn piped_help_has_no_escapes(#[case] no_color: Option<&str>) {
         .arg("--help")
         .assert()
         .success()
-        .stdout(contains("--output").and(contains(ESCAPE).not()));
+        .stdout(contains("--genes").and(contains(ESCAPE).not()));
 }
 
 #[rstest]
@@ -845,7 +929,7 @@ fn piped_help_for_no_arguments_has_no_escapes(#[case] no_color: Option<&str>) {
     annatar_with_no_color(no_color)
         .assert()
         .failure()
-        .stderr(contains("--output").and(contains(ESCAPE).not()));
+        .stderr(contains("--genes").and(contains(ESCAPE).not()));
 }
 
 #[rstest]
@@ -855,9 +939,8 @@ fn piped_help_for_no_arguments_has_no_escapes(#[case] no_color: Option<&str>) {
 fn a_failing_run_has_no_escapes_in_a_pipe(#[case] no_color: Option<&str>) {
     let dir = TempDir::new().unwrap();
     annatar_with_no_color(no_color)
-        .arg("-o")
-        .arg(output_in(&dir))
         .arg(data("errors/ad-length.vcf"))
+        .arg(output_in(&dir))
         .assert()
         .failure()
         .stderr(contains("ERROR").and(contains(ESCAPE).not()));
@@ -876,12 +959,18 @@ fn forcing_color_in_the_environment_does_not_color_a_pipe() {
 #[test]
 fn the_help_lists_every_flag() {
     annatar().arg("--help").assert().success().stdout(
-        contains("--output")
+        contains("<VCF>")
+            .and(contains("<H5AD>"))
+            .and(contains("--output").not())
             .and(contains("--genes"))
             .and(contains("--mane-table"))
             .and(contains("--exclude-field"))
             .and(contains("--threads"))
             .and(contains("MIT License"))
+            .and(contains(
+                "number of copies of this ALT in the called genotype",
+            ))
+            .and(contains("no copies of this ALT").not())
             .and(contains("VEP-annotated multi-sample").not())
             .and(contains("`").not()),
     );

@@ -20,8 +20,56 @@ const BCF_MAGIC: [u8; 4] = *b"BCF\x02";
 
 pub struct VariantSource {
     pub header: Header,
+    pub header_lines: Vec<String>,
     pub samples: Vec<String>,
     pub records: Box<dyn Iterator<Item = io::Result<RecordBuf>>>,
+}
+
+// `Header` groups lines by key, which loses their order across keys, so the raw lines are kept.
+struct HeaderTee {
+    inner: Box<dyn BufRead + Send>,
+    seen: Option<Vec<u8>>,
+}
+
+impl HeaderTee {
+    fn new(inner: Box<dyn BufRead + Send>) -> Self {
+        Self {
+            inner,
+            seen: Some(Vec::new()),
+        }
+    }
+
+    fn take_lines(&mut self) -> Vec<String> {
+        let seen = self.seen.take().unwrap_or_default();
+        String::from_utf8_lossy(&seen)
+            .lines()
+            .filter(|line| line.starts_with("##"))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+impl Read for HeaderTee {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if let Some(seen) = &mut self.seen {
+            seen.extend_from_slice(&buf[..n]);
+        }
+        Ok(n)
+    }
+}
+
+impl BufRead for HeaderTee {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, amt: usize) {
+        if let (Some(seen), Ok(buf)) = (&mut self.seen, self.inner.fill_buf()) {
+            seen.extend_from_slice(&buf[..amt]);
+        }
+        self.inner.consume(amt);
+    }
 }
 
 pub fn open_variants(path: &Path, threads: NonZeroUsize) -> anyhow::Result<VariantSource> {
@@ -32,7 +80,7 @@ pub fn open_variants(path: &Path, threads: NonZeroUsize) -> anyhow::Result<Varia
     };
     let mut raw = BufReader::new(raw);
 
-    let mut inner: Box<dyn BufRead + Send> = if raw.fill_buf()?.starts_with(&GZIP_MAGIC) {
+    let inner: Box<dyn BufRead + Send> = if raw.fill_buf()?.starts_with(&GZIP_MAGIC) {
         if !is_bgzf(raw.fill_buf()?) {
             let name = if path == Path::new("-") {
                 "stdin".to_string()
@@ -47,9 +95,11 @@ pub fn open_variants(path: &Path, threads: NonZeroUsize) -> anyhow::Result<Varia
         Box::new(raw)
     };
 
+    let mut inner = HeaderTee::new(inner);
     if inner.fill_buf()?.starts_with(&BCF_MAGIC) {
         let mut reader = bcf::io::Reader::from(inner);
         let header = read_header(|| reader.read_header())?;
+        let header_lines = reader.get_mut().take_lines();
         let samples = checked_samples(&header)?;
         let records = record_iter(
             header.clone(),
@@ -62,12 +112,14 @@ pub fn open_variants(path: &Path, threads: NonZeroUsize) -> anyhow::Result<Varia
         );
         Ok(VariantSource {
             header,
+            header_lines,
             samples,
             records: Box::new(records),
         })
     } else {
         let mut reader = vcf::io::Reader::new(inner);
         let header = read_header(|| reader.read_header())?;
+        let header_lines = reader.get_mut().take_lines();
         let samples = checked_samples(&header)?;
         let records = record_iter(
             header.clone(),
@@ -80,6 +132,7 @@ pub fn open_variants(path: &Path, threads: NonZeroUsize) -> anyhow::Result<Varia
         );
         Ok(VariantSource {
             header,
+            header_lines,
             samples,
             records: Box::new(records),
         })
@@ -267,6 +320,14 @@ mod tests {
             Some(Value::Array(Array::String(v))) => v.iter().flatten().cloned().collect(),
             other => panic!("unexpected CSQ {other:?}"),
         }
+    }
+
+    #[rstest]
+    fn keeps_the_raw_header_lines(#[values("basic.vcf", "basic.vcf.gz", "basic.bcf")] name: &str) {
+        let lines = open(&data(name)).unwrap().header_lines;
+        assert!(lines.iter().all(|line| line.starts_with("##")));
+        let vep = |prefix: &str| lines.iter().position(|line| line.starts_with(prefix));
+        assert!(vep("##VEP=").unwrap() < vep("##VEP-command-line=").unwrap());
     }
 
     #[rstest]
