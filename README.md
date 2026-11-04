@@ -111,7 +111,7 @@ After merging, two things change.
 ## MuData Example
 
 Color the cells that carry a pathogenic TP53 variant on a chromatin UMAP.
-`MuData` lines the modalities up by cell barcode, so cells without variant data stay gray:
+`MuData` lines the modalities up by cell barcode, and cells with no reads at these variants stay gray:
 
 ```python
 import anndata as ad
@@ -127,8 +127,9 @@ mu = md.MuData({
 variants = mu['variants']
 pathogenic = {'Pathogenic', 'Likely_pathogenic', 'Pathogenic/Likely_pathogenic'}
 hits = (variants.var['SYMBOL'] == 'TP53') & variants.var['ClinVar_CLNSIG'].isin(pathogenic)
-alt_reads = np.asarray(variants[:, hits].layers['AD_alt'].sum(axis=1)).ravel()
-variants.obs['TP53'] = np.where(alt_reads > 0, 'carrier', 'no alt reads')
+alt = np.asarray(variants[:, hits].layers['AD_alt'].sum(axis=1)).ravel()
+ref = np.asarray(variants[:, hits].layers['AD_ref'].sum(axis=1)).ravel()
+variants.obs['TP53'] = np.select([alt > 0, ref > 0], ['carrier', 'reference only'], default=None)
 
 mu.pull_obs('TP53', mods='variants')
 muon.pl.embedding(mu, basis='atac:X_umap', color='variants:TP53')

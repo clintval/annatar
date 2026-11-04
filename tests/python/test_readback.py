@@ -651,16 +651,15 @@ def test_the_readme_mudata_example_selects_carriers(tmp_path):
     variants = mu["variants"]
     pathogenic = {"Pathogenic", "Likely_pathogenic", "Pathogenic/Likely_pathogenic"}
     hits = (variants.var["SYMBOL"] == "TP53") & variants.var["ClinVar_CLNSIG"].isin(pathogenic)
-    alt_reads = np.asarray(variants[:, hits].layers["AD_alt"].sum(axis=1)).ravel()
-    variants.obs["TP53"] = np.where(alt_reads > 0, "carrier", "no alt reads")
+    alt = np.asarray(variants[:, hits].layers["AD_alt"].sum(axis=1)).ravel()
+    ref = np.asarray(variants[:, hits].layers["AD_ref"].sum(axis=1)).ravel()
+    variants.obs["TP53"] = np.select([alt > 0, ref > 0], ["carrier", "reference only"], default=None)
 
     mu.pull_obs("TP53", mods="variants")
-    assert mu.obs["variants:TP53"].to_dict() == {
-        "c1": "no alt reads",
-        "c2": "carrier",
-        "c3": "carrier",
-        "c4": "no alt reads",
-    }
+    labels = mu.obs["variants:TP53"]
+    assert labels[alt > 0].eq("carrier").all() and (alt > 0).any()
+    assert labels[(alt == 0) & (ref > 0)].eq("reference only").all()
+    assert labels[(alt == 0) & (ref == 0)].isna().all()
 
 
 def test_large_output_reads_without_a_hdf5_plugin(tmp_path, monkeypatch):
