@@ -48,7 +48,9 @@ fn parse_every<T>(
             };
             let parsed = parse(value);
             if parsed.is_none() {
-                warn!("CSQ/{name}: {value} is not {wanted}, so the column is text in this file");
+                warn!(
+                    "INFO/CSQ/{name}: {value} is not {wanted}, so the column is text in this file"
+                );
             }
             parsed.map(Some)
         })

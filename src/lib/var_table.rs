@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn csq_exclusion_drops_column() {
-        let exclusions = Exclusions::new(vec!["CSQ/COSMIC".parse().unwrap()]);
+        let exclusions = Exclusions::new(vec!["INFO/CSQ/COSMIC".parse().unwrap()]);
         let info = [spec("COSMIC", Shape::Scalar, Kind::Text)];
         let csq = index(&["SYMBOL", "COSMIC"]);
         let table = VarTable::new(&info, Some(&csq), &exclusions, false);

@@ -34,8 +34,8 @@ For a VEP-annotated VCF, prefer panel genes and leave out CSQ subfields:
 ```bash
 annatar \
     --genes 'panel-genes.txt' \
-    --exclude-field 'CSQ/Existing_variation' \
-    --exclude-field 'CSQ/SOMATIC' \
+    --exclude-field 'INFO/CSQ/Existing_variation' \
+    --exclude-field 'INFO/CSQ/SOMATIC' \
     --output 'cells.h5ad' \
     'cells.vep.vcf.gz'
 ```

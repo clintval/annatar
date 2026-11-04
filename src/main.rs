@@ -89,13 +89,13 @@ struct Cli {
     #[arg(long, value_name = "FILE", verbatim_doc_comment)]
     mane_table: Option<PathBuf>,
 
-    /// Field to leave out, named `INFO/ID`, `FORMAT/ID` or `CSQ/subfield`.
+    /// Field to leave out, named `INFO/ID`, `FORMAT/ID` or `INFO/CSQ/subfield`.
     ///
     /// Repeat the flag to leave out several, such as
-    /// `CSQ/Existing_variation`, `CSQ/SOMATIC` and `CSQ/PHENO`. A name must match
+    /// `INFO/CSQ/Existing_variation` and `INFO/CSQ/SOMATIC`. A name must match
     /// the header exactly: one it does not declare is an error, except that
-    /// `CSQ/subfield` only warns when there is no `INFO/CSQ`. `INFO/CSQ` drops all
-    /// annotation.
+    /// `INFO/CSQ/subfield` only warns when there is no `INFO/CSQ`. `INFO/CSQ`
+    /// drops all annotation.
     #[arg(long, value_name = "FIELD", verbatim_doc_comment)]
     exclude_field: Vec<Exclusion>,
 
@@ -373,9 +373,9 @@ mod tests {
 
     #[test]
     fn help_text_drops_backticks_and_paints_terms() {
-        let text = "Use `CSQ/SYMBOL`.\n  1  one copy\n";
+        let text = "Use `INFO/CSQ/SYMBOL`.\n  1  one copy\n";
         let painted = style_help_text(text);
         assert!(!painted.contains('`'));
-        assert!(painted.contains(&format!("{}CSQ/SYMBOL", CODE.render())));
+        assert!(painted.contains(&format!("{}INFO/CSQ/SYMBOL", CODE.render())));
     }
 }

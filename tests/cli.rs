@@ -371,8 +371,8 @@ fn an_error_input_fails_naming_the_problem_and_writes_nothing(
 #[case("basic.vcf", "FORMAT/GT", "FORMAT/GT cannot be excluded")]
 #[case(
     "basic.vcf",
-    "CSQ/symbol",
-    "--exclude-field CSQ/symbol names nothing in this VCF's header"
+    "INFO/CSQ/symbol",
+    "--exclude-field INFO/CSQ/symbol names nothing in this VCF's header"
 )]
 #[case(
     "basic.vcf",
@@ -454,7 +454,7 @@ fn a_lookup_file_warns_when_there_is_no_csq_to_act_on(#[case] flag: &str, #[case
 }
 
 #[rstest]
-#[case("no-csq.vcf", "CSQ/SYMBOL")]
+#[case("no-csq.vcf", "INFO/CSQ/SYMBOL")]
 #[case("no-csq.vcf", "INFO/CSQ")]
 fn an_exclusion_of_absent_annotation_warns(#[case] name: &str, #[case] field: &str) {
     let dir = TempDir::new().unwrap();
@@ -480,7 +480,7 @@ fn excluding_info_csq_acts_as_a_header_with_no_csq() {
         .arg("-o")
         .arg(output_in(&dir))
         .args(["--exclude-field", "INFO/CSQ"])
-        .args(["--exclude-field", "CSQ/no_such_subfield"])
+        .args(["--exclude-field", "INFO/CSQ/no_such_subfield"])
         .arg("--genes")
         .arg(data("panel-genes.txt"))
         .arg(data("basic.vcf"))
@@ -490,7 +490,7 @@ fn excluding_info_csq_acts_as_a_header_with_no_csq() {
             contains(NO_CSQ_NOTE)
                 .count(1)
                 .and(contains("--exclude-field INFO/CSQ does nothing").not())
-                .and(contains("--exclude-field CSQ/no_such_subfield does nothing").count(1))
+                .and(contains("--exclude-field INFO/CSQ/no_such_subfield does nothing").count(1))
                 .and(contains("--genes does nothing").count(1)),
         );
 }
@@ -517,7 +517,7 @@ fn a_malformed_exclude_field_is_an_error() {
         .arg(data("basic.vcf"))
         .assert()
         .failure()
-        .stderr(contains("expected INFO/ID, FORMAT/ID or CSQ/subfield"));
+        .stderr(contains("expected INFO/ID, FORMAT/ID or INFO/CSQ/subfield"));
 }
 
 #[rstest]
@@ -739,12 +739,12 @@ fn a_value_failing_its_csq_type_warns_once_per_column() {
         .assert()
         .success()
         .stderr(
-            contains("CSQ/STRAND: plus is not an integer, so the column is text in this file")
+            contains("INFO/CSQ/STRAND: plus is not an integer, so the column is text in this file")
                 .count(1)
-                .and(contains("CSQ/TSL: 1&2 is not an integer").count(1))
-                .and(contains("CSQ/REVEL_score: nan is not a number").count(1))
-                .and(contains("CSQ/gnomADe_AF: inf is not a number").count(1))
-                .and(contains("CSQ/CADD_PHRED: 1.5abc is not a number").count(1)),
+                .and(contains("INFO/CSQ/TSL: 1&2 is not an integer").count(1))
+                .and(contains("INFO/CSQ/REVEL_score: nan is not a number").count(1))
+                .and(contains("INFO/CSQ/gnomADe_AF: inf is not a number").count(1))
+                .and(contains("INFO/CSQ/CADD_PHRED: 1.5abc is not a number").count(1)),
         );
 }
 

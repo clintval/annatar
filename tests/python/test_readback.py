@@ -628,7 +628,7 @@ def test_without_the_lookup_flags_none_of_their_output_exists(tmp_path):
 
 
 def test_exclude_field_drops_a_csq_column(tmp_path):
-    a = convert(tmp_path, "basic.vcf", "--exclude-field", "CSQ/SYMBOL")
+    a = convert(tmp_path, "basic.vcf", "--exclude-field", "INFO/CSQ/SYMBOL")
     assert "SYMBOL" not in a.var and "Consequence" in a.var
 
 

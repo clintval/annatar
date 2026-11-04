@@ -18,7 +18,7 @@ impl Section {
         match self {
             Section::Info => "INFO",
             Section::Format => "FORMAT",
-            Section::Csq => "CSQ",
+            Section::Csq => "INFO/CSQ",
         }
     }
 }
@@ -33,12 +33,12 @@ impl FromStr for Exclusion {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let invalid = || "expected INFO/ID, FORMAT/ID or CSQ/subfield".to_string();
+        let invalid = || "expected INFO/ID, FORMAT/ID or INFO/CSQ/subfield".to_string();
         let (prefix, id) = s.split_once('/').ok_or_else(invalid)?;
-        let section = match prefix {
-            "INFO" => Section::Info,
-            "FORMAT" => Section::Format,
-            "CSQ" => Section::Csq,
+        let (section, id) = match (prefix, id.strip_prefix("CSQ/")) {
+            ("INFO", Some(subfield)) => (Section::Csq, subfield),
+            ("INFO", None) => (Section::Info, id),
+            ("FORMAT", _) => (Section::Format, id),
             _ => return Err(invalid()),
         };
         if id.is_empty() {
@@ -210,6 +210,8 @@ mod tests {
 
     use crate::input::open_variants;
 
+    use rstest::rstest;
+
     use super::*;
 
     fn exclusions(items: &[&str]) -> Exclusions {
@@ -231,25 +233,25 @@ mod tests {
         let csq = CsqIndex::from_header(&header);
         let items = exclusions(&[
             "INFO/Z",
-            "CSQ/symbol",
-            "CSQ/SYMBOL",
+            "INFO/CSQ/symbol",
+            "INFO/CSQ/SYMBOL",
             "FORMAT/DP",
             "FORMAT/dp",
         ]);
         assert_eq!(
             items.undeclared(&header, csq.as_ref()),
-            ["CSQ/symbol", "FORMAT/dp", "INFO/Z"]
+            ["FORMAT/dp", "INFO/CSQ/symbol", "INFO/Z"]
         );
     }
 
     #[test]
     fn annotation_exclusions_are_not_undeclared_without_csq() {
         let header = header_of("no-csq.vcf");
-        let items = exclusions(&["CSQ/SYMBOL", "INFO/CSQ", "INFO/Z"]);
+        let items = exclusions(&["INFO/CSQ/SYMBOL", "INFO/CSQ", "INFO/Z"]);
         assert_eq!(items.undeclared(&header, None), ["INFO/Z"]);
         assert_eq!(
             items.without_csq_to_act_on(&header),
-            ["CSQ/SYMBOL", "INFO/CSQ"]
+            ["INFO/CSQ", "INFO/CSQ/SYMBOL"]
         );
     }
 
@@ -331,15 +333,27 @@ mod tests {
 
     #[test]
     fn exclusion_parses_section_and_id() {
-        let parsed: Exclusion = "CSQ/COSMIC".parse().unwrap();
+        let parsed: Exclusion = "INFO/CSQ/COSMIC".parse().unwrap();
         assert_eq!(parsed.section, Section::Csq);
         assert_eq!(parsed.id, "COSMIC");
     }
 
+    #[rstest]
+    #[case("COSMIC")]
+    #[case("CSQ/COSMIC")]
+    #[case("INFO/")]
+    #[case("INFO/CSQ/")]
+    #[case("FORMAT/")]
+    fn exclusion_outside_the_grammar_is_rejected(#[case] name: &str) {
+        let error = name.parse::<Exclusion>().unwrap_err();
+        assert_eq!(error, "expected INFO/ID, FORMAT/ID or INFO/CSQ/subfield");
+    }
+
     #[test]
-    fn exclusion_without_section_is_rejected() {
-        let error = "COSMIC".parse::<Exclusion>().unwrap_err();
-        assert_eq!(error, "expected INFO/ID, FORMAT/ID or CSQ/subfield");
+    fn the_whole_of_csq_is_an_info_field() {
+        let parsed: Exclusion = "INFO/CSQ".parse().unwrap();
+        assert_eq!(parsed.section, Section::Info);
+        assert_eq!(parsed.id, "CSQ");
     }
 
     #[test]
