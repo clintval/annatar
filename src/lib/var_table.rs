@@ -198,6 +198,9 @@ impl VarTable {
             }
             None => (None, false, false),
         };
+        let pos = i64::try_from(row.pos)?;
+        let ref_reads = i64::try_from(row.ref_reads)?;
+        let alt_reads = i64::try_from(row.alt_reads)?;
 
         for (column, value) in self.info.iter_mut().zip(info) {
             column.1.push(value);
@@ -212,7 +215,7 @@ impl VarTable {
         self.names
             .push(variant_name(&row.chrom, row.pos, &row.reference, &row.alt));
         self.chrom.push(Some(row.chrom));
-        self.pos.push(Some(i64::try_from(row.pos)?));
+        self.pos.push(Some(pos));
         self.reference.push(Some(row.reference));
         self.alt.push(Some(row.alt));
         self.id.push(row.id);
@@ -221,8 +224,8 @@ impl VarTable {
         self.n_cells_covered
             .push(Some(i64::from(row.n_cells_covered)));
         self.n_cells_alt.push(Some(i64::from(row.n_cells_alt)));
-        self.ref_reads.push(Some(i64::try_from(row.ref_reads)?));
-        self.alt_reads.push(Some(i64::try_from(row.alt_reads)?));
+        self.ref_reads.push(Some(ref_reads));
+        self.alt_reads.push(Some(alt_reads));
         self.consequence_rank.push(rank);
         self.is_coding.push(coding);
         self.is_lof.push(lof);
@@ -278,6 +281,7 @@ impl VarTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consequence::rank;
     use crate::fields::Shape;
     use crate::h5ad::{Output, write_h5ad};
     use nalgebra_sparse::CsrMatrix;
@@ -420,6 +424,91 @@ mod tests {
             assert!(names.iter().any(|n| n == expected), "{expected}");
         }
         assert_eq!(names.iter().filter(|n| *n == "SYMBOL").count(), 1);
+    }
+
+    #[test]
+    fn expanded_info_names_are_checked_for_collisions() {
+        let info = [spec("AF", Shape::RefAlt, Kind::Float)];
+        let csq = index(&["AF_ref"]);
+        let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), false);
+        let (_, df) = table.finish().unwrap();
+        let names = names(&df);
+        assert!(names.contains(&"INFO_AF_ref".to_string()));
+        assert!(names.contains(&"AF_alt".to_string()));
+        assert_eq!(names.iter().filter(|n| *n == "AF_ref").count(), 1);
+    }
+
+    #[test]
+    fn picked_values_land_in_their_rows() {
+        let info = [
+            spec("DP", Shape::Scalar, Kind::Integer),
+            spec("INDEL", Shape::Scalar, Kind::Flag),
+        ];
+        let csq = index(&["Consequence", "SYMBOL", "REVEL_score"]);
+        let mut table = VarTable::new(&info, Some(&csq), &Exclusions::default(), true);
+        let lof = entry(&["stop_gained", "TP53", "0.9"]);
+        let silent = entry(&["synonymous_variant&intron_variant", "NPM1", "0.1"]);
+        let values = |dp, indel| vec![InfoValue::Int(Some(dp)), InfoValue::Flag(indel)];
+        table
+            .push(
+                row(1, "T"),
+                values(11, true),
+                Some((&lof, Tier::ManeSelect)),
+                Some("HIGH"),
+            )
+            .unwrap();
+        table
+            .push(
+                row(2, "G"),
+                values(22, false),
+                Some((&silent, Tier::Other)),
+                Some("LOW"),
+            )
+            .unwrap();
+        let (_, df) = table.finish().unwrap();
+
+        let ints = |name: &str| -> Vec<Option<i64>> {
+            df.column(name).unwrap().i64().unwrap().iter().collect()
+        };
+        let bools = |name: &str| -> Vec<Option<bool>> {
+            df.column(name).unwrap().bool().unwrap().iter().collect()
+        };
+        let texts = |name: &str| -> Vec<Option<String>> {
+            let column = df.column(name).unwrap().cast(&DataType::String).unwrap();
+            column
+                .str()
+                .unwrap()
+                .iter()
+                .map(|v| v.map(str::to_string))
+                .collect()
+        };
+        let stop_rank = i64::from(rank("stop_gained").unwrap());
+        let silent_rank = i64::from(rank("synonymous_variant").unwrap());
+        assert_eq!(
+            ints("consequence_rank"),
+            [Some(stop_rank), Some(silent_rank)]
+        );
+        assert_eq!(bools("is_coding"), [Some(true), Some(true)]);
+        assert_eq!(bools("is_lof"), [Some(true), Some(false)]);
+        assert_eq!(
+            texts("pick_tier"),
+            [Some("mane_select".into()), Some("other".into())]
+        );
+        assert_eq!(
+            texts("worst_panel_impact"),
+            [Some("HIGH".into()), Some("LOW".into())]
+        );
+        assert_eq!(texts("SYMBOL"), [Some("TP53".into()), Some("NPM1".into())]);
+        let revel: Vec<Option<f64>> = df
+            .column("REVEL_score")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .collect();
+        assert_eq!(revel, [Some(0.9), Some(0.1)]);
+        assert_eq!(ints("DP"), [Some(11), Some(22)]);
+        assert_eq!(bools("INDEL"), [Some(true), Some(false)]);
     }
 
     #[test]
