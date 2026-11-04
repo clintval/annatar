@@ -1,0 +1,27 @@
+[workspace]
+authors = ["clintval <valentine.clint@gmail.com>"]
+channels = ["conda-forge", "bioconda"]
+name = "annatar"
+platforms = ["linux-64", "osx-64", "osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+build = { cmd = "cargo build --release", env = { CARGO_BUILD_JOBS = "4" } }
+test = { cmd = "cargo test --all --no-fail-fast", env = { CARGO_BUILD_JOBS = "4" } }
+fmt = "cargo fmt"
+fmt-check = "cargo fmt -- --check"
+lint = { cmd = "cargo clippy --all-targets --all-features -- -D warnings", env = { CARGO_BUILD_JOBS = "4" } }
+fixture-h5ad = { cmd = "cargo test --lib writes_fixture -- --ignored", env = { CARGO_BUILD_JOBS = "4" } }
+test-readback = "pytest tests/python"
+
+[dependencies]
+anndata = ">=0.10"
+bcftools = "1.24"
+cmake = "*"
+htslib = "*"
+make = "*"
+mudata = ">=0.3"
+pytest = "*"
+python = "3.12.*"
+rust = ">=1.92"
+scanpy = "*"
