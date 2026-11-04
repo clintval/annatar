@@ -645,14 +645,22 @@ def test_the_whole_question_selects_one_variant(tmp_path):
     assert hits.X.nnz == 3
 
 
+@pytest.mark.filterwarnings("ignore:The inplace keyword in DataFrame")
 def test_the_readme_mudata_example_selects_carriers(tmp_path):
-    variants = convert(tmp_path, "question.vcf")
-    mu = md.MuData({"variants": variants})
+    mu = md.MuData({"variants": convert(tmp_path, "question.vcf")})
+    variants = mu["variants"]
     pathogenic = {"Pathogenic", "Likely_pathogenic", "Pathogenic/Likely_pathogenic"}
     hits = (variants.var["SYMBOL"] == "TP53") & variants.var["ClinVar_CLNSIG"].isin(pathogenic)
-    carriers = np.asarray(variants[:, hits].layers["AD_alt"].sum(axis=1)).ravel() > 0
-    assert carriers.shape == (mu["variants"].n_obs,)
-    assert carriers.any()
+    alt_reads = np.asarray(variants[:, hits].layers["AD_alt"].sum(axis=1)).ravel()
+    variants.obs["TP53"] = np.where(alt_reads > 0, "carrier", "no alt reads")
+
+    mu.pull_obs("TP53", mods="variants")
+    assert mu.obs["variants:TP53"].to_dict() == {
+        "c1": "no alt reads",
+        "c2": "carrier",
+        "c3": "carrier",
+        "c4": "no alt reads",
+    }
 
 
 def test_large_output_reads_without_a_hdf5_plugin(tmp_path, monkeypatch):

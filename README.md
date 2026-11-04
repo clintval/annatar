@@ -26,7 +26,7 @@ The h5ad can sit next to other single-cell modalities in a `MuData` keyed on cel
 Convert a VCF of cells:
 
 ```bash
-annatar --output 'cells.h5ad' 'cells.vcf.gz'
+bcftools view 'cells.vcf.gz' | annatar --output 'cells.h5ad'
 ```
 
 For a VEP-annotated VCF, prefer panel genes and leave out CSQ subfields:
@@ -40,16 +40,7 @@ annatar \
     'cells.vep.vcf.gz'
 ```
 
-A field passed to `--exclude-field` must be declared in the VCF header, or annatar exits with an error.
-A `CSQ/` field only warns when the header has no `INFO/CSQ`, so one command serves annotated and plain VCFs.
 Excluding `INFO/CSQ` drops all annotation. The fields `FORMAT/AD` and `FORMAT/GT` cannot be excluded.
-
-Read from standard input:
-
-```bash
-bcftools view 'cells.bcf' \
-| annatar --output 'cells.h5ad'
-```
 
 ## Output
 
@@ -119,20 +110,28 @@ After merging, two things change.
 
 ## MuData Example
 
-Color the cells that carry a pathogenic TP53 variant, next to a chromatin modality that shares the cell barcodes:
+Color the cells that carry a pathogenic TP53 variant on a chromatin UMAP.
+`MuData` lines the modalities up by cell barcode, so cells without variant data stay gray:
 
 ```python
 import anndata as ad
 import mudata as md
+import muon
 import numpy as np
 
-variants = ad.read_h5ad('cells.h5ad')
-atac = ad.read_h5ad('cells.atac.h5ad')
-mu = md.MuData({'atac': atac, 'variants': variants})
+mu = md.MuData({
+    'atac': ad.read_h5ad('cells.atac.h5ad'),
+    'variants': ad.read_h5ad('cells.h5ad'),
+})
 
+variants = mu['variants']
 pathogenic = {'Pathogenic', 'Likely_pathogenic', 'Pathogenic/Likely_pathogenic'}
 hits = (variants.var['SYMBOL'] == 'TP53') & variants.var['ClinVar_CLNSIG'].isin(pathogenic)
-carriers = np.asarray(variants[:, hits].layers['AD_alt'].sum(axis=1)).ravel() > 0
+alt_reads = np.asarray(variants[:, hits].layers['AD_alt'].sum(axis=1)).ravel()
+variants.obs['TP53'] = np.where(alt_reads > 0, 'carrier', 'no alt reads')
+
+mu.pull_obs('TP53', mods='variants')
+muon.pl.embedding(mu, basis='atac:X_umap', color='variants:TP53')
 ```
 
 ## Development and Testing
