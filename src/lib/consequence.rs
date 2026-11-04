@@ -86,7 +86,10 @@ pub fn most_severe(consequence: &str) -> anyhow::Result<(&'static str, u8)> {
             })
         })
         .collect::<anyhow::Result<Vec<u8>>>()?;
-    let best = ranks.into_iter().min().expect("split yields at least one term");
+    let best = ranks
+        .into_iter()
+        .min()
+        .expect("split yields at least one term");
     Ok((CONSEQUENCES[usize::from(best) - 1], best))
 }
 
