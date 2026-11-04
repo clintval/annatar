@@ -25,3 +25,11 @@ pytest = "*"
 python = "3.12.*"
 rust = ">=1.92"
 scanpy = "*"
+
+[target.linux-64.dependencies]
+c-compiler = "*"
+cxx-compiler = "*"
+
+[target.linux-64.activation.env]
+CC = "gcc"
+CXX = "g++"
