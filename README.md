@@ -58,7 +58,7 @@ import annatar
 adata = annatar.read_vcf('cells.vcf.gz')
 ```
 
-The `read_vcf` function takes `genes`, `mane_table`, `exclude_fields` and `threads`, which match the flags above, and gives the same contents as the h5ad.
+The `read_vcf` function takes `genes`, `mane_table`, `exclude_fields` and `threads`, which match the CLI flags above, and gives the same contents as the h5ad.
 
 ## Output
 
