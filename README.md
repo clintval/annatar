@@ -56,8 +56,6 @@ Merge the h5ad files of several libraries into one:
 annatar merge --output 'merged.h5ad' 'a.h5ad' 'b.h5ad'
 ```
 
-From Python, `annatar.concat(['a.h5ad', 'b.h5ad'])` gives the same result as an AnnData.
-
 Cells become `barcode-library`, named after each file, and `obs['library']` holds the library's name.
 Variants are the union of the libraries, sorted by VCF header contig order, then `pos`, `ref` and `alt`.
 The columns `n_cells_covered`, `n_cells_alt`, `ref_reads` and `alt_reads` are recounted from the merged layers.
@@ -75,7 +73,11 @@ import annatar
 adata = annatar.read_vcf('cells.vcf.gz')
 ```
 
-The `read_vcf` function takes `genes`, `mane_table`, `exclude_fields` and `threads`, which match the CLI flags above, and gives the same contents as the h5ad.
+Merge libraries into an in-memory AnnData:
+
+```python
+merged = annatar.concat(['a.h5ad', 'b.h5ad'])
+```
 
 ## Output
 
