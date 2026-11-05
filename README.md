@@ -52,7 +52,7 @@ Excluding `INFO/CSQ` drops all annotation. The fields `FORMAT/AD` and `FORMAT/GT
 | `var` | One row per ALT allele, named `chrom:pos:ref:alt` |
 | `uns` | Provenance and the encoding of `X` |
 
-### Genotypes
+#### Genotypes
 
 `X` holds the number of copies of the ALT in the called genotype, so `0/1` is 1 and `1/1` is 2, and hom-ref and uncalled cells are not stored.
 So `X > 0` means a called carrier and `X.sum()` counts ALT haplotypes.
@@ -62,13 +62,13 @@ Layers are read counts, with zeros and missing values not stored.
 At a variant a cell is a carrier (`X > 0`, or `AD_alt > 0` for reads), reference (`AD_ref > 0` with no `X` or `AD_alt`), or has no data.
 A cell with reads but no call keeps them in the layers, and `AD_alt` counts alt reads in cells called `0/0`.
 
-### Variants
+#### Variants
 
 Every ALT gets its own row, whether it is an SNV, indel, MNV, symbolic ALT or breakend.
 The placeholder alleles `*`, `<*>` and `<NON_REF>` get no row.
 The VCF must declare `FORMAT/AD`.
 
-### VEP Annotation
+#### VEP Annotation
 
 VEP is optional.
 When the VCF has `INFO/CSQ`, one consequence per variant is added to `var` with its VEP subfield names, along with these columns:
