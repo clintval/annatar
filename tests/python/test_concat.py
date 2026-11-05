@@ -248,6 +248,14 @@ def test_a_merge_writes_and_reads_back(tmp_path):
     )
 
 
+def test_gt_merges_like_any_layer():
+    a, b = read("capped-copies.vcf"), read("no-gt.vcf")
+    merged = annatar.concat({"a": a, "b": b})
+    assert merged.layers["GT"].dtype == np.int8
+    assert merged.layers["GT"].sum() == a.layers["GT"].sum()
+    assert merged[merged.obs["library"] == "b"].layers["GT"].nnz == 0
+
+
 def test_nothing_to_merge_raises():
     with pytest.raises(ValueError):
         annatar.concat([])

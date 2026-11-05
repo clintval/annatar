@@ -164,15 +164,38 @@ def test_sparse_arrays_arrive_without_a_copy():
 def test_x_is_capped_at_this_alts_read_count():
     adata = read_quietly(DATA / "capped-copies.vcf")
     x = np.asarray(adata.X.todense())
-    assert x[:, adata.var_names.get_loc("chr1:100:A:G")].tolist() == [1, 2, 2, 2, 0, 1, 0, 0]
-    assert x[:, adata.var_names.get_loc("chr1:200:A:G")].tolist() == [1, 0, 0, 1, 0, 2, 0, 0]
-    assert x[:, adata.var_names.get_loc("chr1:200:A:T")].tolist() == [0, 1, 1, 1, 0, 0, 0, 0]
+    assert x[:, adata.var_names.get_loc("chr1:100:A:G")].tolist() == [1, 2, 2, 2, 0, 1, 0, 0, 2]
+    assert x[:, adata.var_names.get_loc("chr1:200:A:G")].tolist() == [1, 0, 0, 1, 0, 2, 0, 0, 0]
+    assert x[:, adata.var_names.get_loc("chr1:200:A:T")].tolist() == [0, 1, 1, 1, 0, 0, 0, 0, 0]
+
+
+def test_gt_holds_the_copies_as_the_vcf_called_them():
+    adata = read_quietly(DATA / "capped-copies.vcf")
+    assert adata.layers["GT"].dtype == np.int8
+    gt = np.asarray(adata.layers["GT"].todense())
+    assert gt[:, adata.var_names.get_loc("chr1:100:A:G")].tolist() == [2, 2, 2, 3, 1, 1, 0, 0, 2]
+    assert gt[:, adata.var_names.get_loc("chr1:200:A:G")].tolist() == [2, 0, 1, 1, 0, 2, 0, 0, 0]
+    assert gt[:, adata.var_names.get_loc("chr1:200:A:T")].tolist() == [0, 2, 1, 1, 2, 0, 1, 0, 0]
+    assert adata.layers["GT"].data.min() > 0
+
+
+def test_gt_counts_copies_as_every_genotype_shape_calls_them():
+    adata = read_quietly(DATA / "copies.vcf")
+    gt = np.asarray(adata.layers["GT"].todense())
+    expected = [1, 2, 1, 3, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0]
+    assert gt[:, adata.var_names.get_loc("chr1:100:A:G")].tolist() == expected
+
+
+def test_a_header_without_gt_has_no_gt_layer():
+    adata = read_quietly(DATA / "no-gt.vcf")
+    assert "GT" not in adata.layers
+    assert adata.X.nnz == 0
 
 
 def test_a_cap_leaves_the_reads_in_the_layers():
     adata = read_quietly(DATA / "capped-copies.vcf")
     alt = np.asarray(adata.layers["AD_alt"].todense())
-    assert alt[:, adata.var_names.get_loc("chr1:100:A:G")].tolist() == [1, 2, 5, 2, 0, 0, 2, 1]
+    assert alt[:, adata.var_names.get_loc("chr1:100:A:G")].tolist() == [1, 2, 5, 2, 0, 0, 2, 1, 0]
     assert adata.X.data.min() > 0
 
 
@@ -210,6 +233,23 @@ def test_x_never_exceeds_an_alt_count(path):
     alt = np.asarray(adata.layers["AD_alt"].todense())
     assert (x[counted] <= alt[counted]).all()
     assert x[counted].sum() <= alt[counted].sum()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [p for p in FIXTURES if p.suffix == ".vcf" and p.name not in ("sites-only.vcf", "no-gt.vcf")],
+    ids=lambda p: p.name,
+)
+def test_x_is_gt_capped_at_the_alt_count(path):
+    adata = read_quietly(path)
+    x = np.asarray(adata.X.todense())
+    gt = np.asarray(adata.layers["GT"].todense())
+    capped = np.minimum(gt, np.asarray(adata.layers["AD_alt"].todense()))
+    for cell, variant in cells_with_no_alt_count(path):
+        if variant in adata.var_names:
+            where = adata.obs_names.get_loc(cell), adata.var_names.get_loc(variant)
+            capped[where] = gt[where]
+    assert np.array_equal(x, capped)
 
 
 def test_contigs_come_from_the_header_in_its_order(tmp_path):

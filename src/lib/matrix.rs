@@ -61,6 +61,7 @@ struct Layer {
 pub struct SparseBuilder {
     n_obs: usize,
     x: Columns<i8>,
+    called: Option<Columns<i8>>,
     layers: Vec<Layer>,
 }
 
@@ -84,7 +85,24 @@ impl SparseBuilder {
         Self {
             n_obs,
             x: Columns::new(),
+            called: None,
             layers,
+        }
+    }
+
+    /// Keeps the copies as called in a `GT` layer.
+    #[must_use]
+    pub fn with_called_copies(mut self) -> Self {
+        self.called = Some(Columns::new());
+        self
+    }
+
+    /// Rows must ascend within a column.
+    pub fn push_called(&mut self, row: u32, copies: i8) {
+        if let Some(called) = &mut self.called
+            && copies > 0
+        {
+            called.push(row, copies);
         }
     }
 
@@ -122,6 +140,9 @@ impl SparseBuilder {
 
     pub fn end_column(&mut self) {
         self.x.end_column();
+        if let Some(called) = &mut self.called {
+            called.end_column();
+        }
         for layer in &mut self.layers {
             match &mut layer.columns {
                 LayerColumns::Int(c) => c.end_column(),
@@ -144,6 +165,9 @@ impl SparseBuilder {
                 LayerColumns::Float(c) => LayerMatrix::F32(c.into_csr(n_obs)),
             };
             layers.push((layer.name, matrix));
+        }
+        if let Some(called) = self.called {
+            layers.push(("GT".to_string(), LayerMatrix::I8(called.into_csr(n_obs))));
         }
         Matrices {
             x: self.x.into_csr(n_obs),
@@ -213,6 +237,26 @@ mod tests {
         assert_eq!(csr_entry(&m.x, 0, 0), None);
         assert_eq!(csr_entry(&m.x, 1, 0), Some(1));
         assert_eq!(csr_entry(&m.x, 2, 0), Some(2));
+    }
+
+    #[test]
+    fn called_copies_are_a_layer_only_when_asked_for() {
+        let mut b = SparseBuilder::new(2, &int_layers()).with_called_copies();
+        b.push_called(0, 2);
+        b.push_called(1, 0);
+        b.end_column();
+        let m = b.finish();
+        let LayerMatrix::I8(gt) = &m.layers[1].1 else {
+            panic!("wrong kind")
+        };
+        assert_eq!(m.layers[1].0, "GT");
+        assert_eq!(gt.nnz(), 1);
+        assert_eq!(csr_entry(gt, 0, 0), Some(2));
+
+        let mut b = SparseBuilder::new(2, &int_layers());
+        b.push_called(0, 2);
+        b.end_column();
+        assert_eq!(b.finish().layers.len(), 1);
     }
 
     #[test]

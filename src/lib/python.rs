@@ -209,6 +209,7 @@ impl<'py> Conversion<'py> {
             .into_iter()
             .map(|(name, matrix)| {
                 let arrays = match matrix {
+                    LayerMatrix::I8(matrix) => sparse(py, matrix)?,
                     LayerMatrix::I32(matrix) => sparse(py, matrix)?,
                     LayerMatrix::F32(matrix) => sparse(py, matrix)?,
                 };

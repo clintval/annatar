@@ -2,6 +2,6 @@
 ##contig=<ID=chr1,length=100000>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
-#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	c1	c2	c3	c4	c5	c6	c7	c8
-chr1	100	.	A	G	50	PASS	.	GT:AD	1/1:0,1	1/1:0,2	1/1:0,5	1/1/1:0,2	0/1:0,0	0/1:.	0/0:3,2	./.:1,1
-chr1	200	.	A	G,T	50	PASS	.	GT:AD	1/1:0,1,5	2/2:0,5,1	1/2:0,0,3	1/2:0,2,2	2/2:0,0,0	1/1:2,.,3	0/2:3,1,0	./.:.
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	c1	c2	c3	c4	c5	c6	c7	c8	c9
+chr1	100	.	A	G	50	PASS	.	GT:AD	1/1:0,1	1/1:0,2	1/1:0,5	1/1/1:0,2	0/1:0,0	0/1:.	0/0:3,2	./.:1,1	1/1:.
+chr1	200	.	A	G,T	50	PASS	.	GT:AD	1/1:0,1,5	2/2:0,5,1	1/2:0,0,3	1/2:0,2,2	2/2:0,0,0	1/1:2,.,3	0/2:3,1,0	./.:.	0/0:1,0,0

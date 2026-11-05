@@ -15,8 +15,8 @@ from conftest import BINARY
 from conftest import DATA
 
 X_ENCODING = (
-    "number of copies of this ALT in the called genotype, capped at this ALT's read count; "
-    "hom-ref and uncalled are not stored"
+    "number of copies of this ALT in the called genotype, capped at this ALT's read count, "
+    "with layers['GT'] uncapped; hom-ref and uncalled are not stored"
 )
 
 

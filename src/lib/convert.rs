@@ -84,7 +84,8 @@ pub fn convert(config: &Config) -> anyhow::Result<Output> {
         genes: genes.as_ref().map(|genes| &genes.value),
         mane: mane.as_ref().map(|mane| &mane.value),
     };
-    let mut conversion = Conversion::new(&plan, lookups, &config.exclusions, samples.len());
+    let has_gt = header.formats().contains_key("GT");
+    let mut conversion = Conversion::new(&plan, lookups, &config.exclusions, samples.len(), has_gt);
     if let Some(name) = conversion.var.duplicate_column() {
         bail!("two fields make the var column {name}");
     }
@@ -672,6 +673,7 @@ impl<'a> Conversion<'a> {
         lookups: Lookups<'a>,
         exclusions: &Exclusions,
         n_obs: usize,
+        has_gt: bool,
     ) -> Self {
         let layers: Vec<(String, Kind)> = plan
             .format
@@ -682,6 +684,7 @@ impl<'a> Conversion<'a> {
                     .map(|name| (name, spec.kind))
             })
             .collect();
+        let matrix = SparseBuilder::new(n_obs, &layers);
         Self {
             plan,
             lookups,
@@ -691,7 +694,11 @@ impl<'a> Conversion<'a> {
                 exclusions,
                 lookups.csq.is_some() && lookups.genes.is_some(),
             ),
-            matrix: SparseBuilder::new(n_obs, &layers),
+            matrix: if has_gt {
+                matrix.with_called_copies()
+            } else {
+                matrix
+            },
             n_sites_covered: vec![0; n_obs],
             n_sites_alt: vec![0; n_obs],
             skipped_alts: 0,
@@ -793,8 +800,9 @@ impl<'a> Conversion<'a> {
             samples.fill_alleles(sample, &mut alleles);
             let depths = samples.allelic_depths(sample);
             let reads = depths.get(allele).copied().flatten();
-            let copies = capped_copies(copies_of_alt(&alleles, allele), reads);
-            self.matrix.push_copies(row, copies);
+            let copies = copies_of_alt(&alleles, allele);
+            self.matrix.push_called(row, copies);
+            self.matrix.push_copies(row, capped_copies(copies, reads));
             let has_reads = depths.iter().flatten().any(|reads| *reads > 0);
             for (slot, &(layer, position, kind)) in slots.iter().enumerate() {
                 let cell = samples.cell(layer, sample, position, kind);

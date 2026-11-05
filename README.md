@@ -84,7 +84,7 @@ merged = annatar.concat(['a.h5ad', 'b.h5ad'])
 | Slot | Contents |
 | --- | --- |
 | `X` | Copies of each ALT in each cell's called genotype, capped at its read count |
-| `layers` | Numeric FORMAT fields, such as `AD_ref`, `AD_alt` and `DP` |
+| `layers` | Called copies as `GT`, and numeric FORMAT fields, such as `AD_ref`, `AD_alt` and `DP` |
 | `obs` | Per-cell counts, `n_sites_covered` and `n_sites_alt` |
 | `var` | One row per ALT allele, named `chrom:pos:ref:alt` |
 | `uns` | Provenance and the encoding of `X` |
@@ -96,8 +96,9 @@ Hom-ref and uncalled cells are not stored, and neither is a call with no alt rea
 A missing alt count (`.`) cannot cap anything, so that call keeps its copies.
 So `X > 0` means a called carrier with alt reads, and `X.sum()` never exceeds the alt reads that were counted.
 A haploid ALT call is 1, so `X == 2` does not find it.
+Beside it, `layers['GT']` holds the copies as the VCF called them, and `X` holds those capped at the alt reads, so for imputed genotypes `adata.X = adata.layers['GT']` restores them.
 
-Layers are read counts, with zeros and missing values not stored.
+The other layers are read counts, with zeros and missing values not stored.
 At a variant a cell is a carrier (`X > 0`, or `AD_alt > 0` for reads), reference (`AD_ref > 0` with no `X` or `AD_alt`), or has no data.
 A cell with reads but no call keeps them in the layers, and `AD_alt` counts alt reads in cells called `0/0`.
 
