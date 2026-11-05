@@ -44,7 +44,13 @@ Excluding `INFO/CSQ` drops all annotation. The fields `FORMAT/AD` and `FORMAT/GT
 
 ## Python
 
-Convert a VCF into an in-memory AnnData, or merge libraries, from Python:
+Install the Python package:
+
+```bash
+pip install annatar
+```
+
+Convert a VCF into an in-memory AnnData:
 
 ```python
 import annatar
@@ -53,12 +59,6 @@ adata = annatar.read_vcf('cells.vcf.gz')
 ```
 
 The `read_vcf` function takes `genes`, `mane_table`, `exclude_fields` and `threads`, which match the flags above, and gives the same contents as the h5ad.
-
-Nothing is on PyPI yet, so build the package from the repository with Rust:
-
-```bash
-pip install 'git+https://github.com/clintval/annatar'
-```
 
 The package does not install the `annatar` command.
 
