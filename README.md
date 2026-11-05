@@ -35,7 +35,7 @@ Convert a VCF of cells:
 annatar 'cells.vcf.gz' 'cells.h5ad'
 ```
 
-For a VEP-annotated VCF, prefer panel genes and leave out CSQ subfields:
+For a VEP-annotated VCF, prioritize effects in a gene set and leave out CSQ subfields:
 
 ```bash
 annatar \
