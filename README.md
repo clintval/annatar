@@ -2,16 +2,21 @@
 
 ---
 
+[![Install with bioconda](https://img.shields.io/badge/Install%20with-bioconda-brightgreen.svg)](http://bioconda.github.io/recipes/annatar/README.html)
+[![Anaconda Version](https://anaconda.org/bioconda/annatar/badges/version.svg)](http://bioconda.github.io/recipes/annatar/README.html)
 [![Build Status](https://github.com/clintval/annatar/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/clintval/annatar/actions/workflows/ci.yml?query=branch%3Amain)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/clintval/annatar/blob/main/LICENSE)
 [![Language](https://img.shields.io/badge/language-rust-dea588.svg)](https://www.rust-lang.org/)
 
 Convert a multi-sample VCF of single cells into an AnnData h5ad.
 
-Install from GitHub with Rust and `cmake`, which builds the bundled HDF5:
+Install with mamba, conda, or run directly with pixi:
 
 ```bash
-cargo install --locked --git https://github.com/clintval/annatar
+pixi exec \
+    --channel conda-forge \
+    --channel bioconda \
+    annatar --help
 ```
 
 ## Introduction
@@ -44,7 +49,7 @@ Excluding `INFO/CSQ` drops all annotation. The fields `FORMAT/AD` and `FORMAT/GT
 
 ## Python
 
-Install the Python package:
+The bioconda package provides the Python package too, and pip also gives both the library and the command:
 
 ```bash
 pip install annatar
@@ -59,8 +64,6 @@ adata = annatar.read_vcf('cells.vcf.gz')
 ```
 
 The `read_vcf` function takes `genes`, `mane_table`, `exclude_fields` and `threads`, which match the flags above, and gives the same contents as the h5ad.
-
-The package does not install the `annatar` command.
 
 ## Output
 
@@ -113,18 +116,16 @@ Other VEP versions run with a warning.
 
 ## Merging Libraries
 
-Merge the h5ad files of several libraries into one AnnData:
+Merge the h5ad files of several libraries into one:
 
-```python
-import annatar
-
-adata = annatar.concat({'a': 'a.h5ad', 'b': 'b.h5ad'})
+```bash
+annatar merge --output 'merged.h5ad' 'a.h5ad' 'b.h5ad'
 ```
 
-Cells become `barcode-library`, and `obs['library']` holds the library's name.
-A list names each file after its path, and AnnData objects work in place of paths.
+From Python, `annatar.concat(['a.h5ad', 'b.h5ad'])` gives the same result as an AnnData.
 
-Every variant of every library keeps its annotation.
+Cells become `barcode-library`, named after each file, and `obs['library']` holds the library's name.
+Variants are the union of the libraries, sorted by VCF header contig order, then `pos`, `ref` and `alt`.
 The columns `n_cells_covered`, `n_cells_alt`, `ref_reads` and `alt_reads` are recounted from the merged layers.
 Any other `var` value on a shared variant, such as `qual` or an INFO field, comes from the first library holding it, and later libraries fill only the columns that library lacks entirely.
 A column that is text in one library and numeric in another stays text.
