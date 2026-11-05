@@ -173,7 +173,7 @@ muon.pl.embedding(
 )
 ```
 
-![Two UMAPs of simulated cells, colored by cell type and by TP53 state, with carriers only in the tumor cluster](https://raw.githubusercontent.com/clintval/annatar/main/.github/img/annatar_example.png)
+![Two UMAPs of simulated cells, colored by cell type and by TP53 state, with carriers only in the tumor cluster](.github/img/annatar_example.png)
 
 ## Development and Testing
 
