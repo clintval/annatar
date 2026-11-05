@@ -1,9 +1,9 @@
-![Banner for annatar](.github/img/annatar_banner.svg)
+![Banner for annatar](https://raw.githubusercontent.com/clintval/annatar/main/.github/img/annatar_banner.svg)
 
 ---
 
 [![Build Status](https://github.com/clintval/annatar/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/clintval/annatar/actions/workflows/ci.yml?query=branch%3Amain)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/clintval/annatar/blob/main/LICENSE)
 [![Language](https://img.shields.io/badge/language-rust-dea588.svg)](https://www.rust-lang.org/)
 
 Convert a multi-sample VCF of single cells into an AnnData h5ad.
@@ -41,6 +41,29 @@ annatar \
 ```
 
 Excluding `INFO/CSQ` drops all annotation. The fields `FORMAT/AD` and `FORMAT/GT` cannot be excluded.
+
+## Python
+
+Convert a VCF into an in-memory AnnData, or merge libraries, from Python:
+
+```python
+import annatar
+
+adata = annatar.read_vcf('cells.vcf.gz')
+merged = annatar.concat(['a.h5ad', 'b.h5ad'])
+```
+
+The `read_vcf` function takes `genes`, `mane_table`, `exclude_fields` and `threads`, which match the flags above, and gives the same contents as the h5ad.
+Errors raise exceptions with the same messages, and warnings go through the Python `warnings` module.
+The info line for a VCF with no `INFO/CSQ` does not reach Python.
+
+Nothing is on PyPI yet, so build the package from the repository with Rust:
+
+```bash
+pip install 'git+https://github.com/clintval/annatar'
+```
+
+The package does not install the `annatar` command.
 
 ## Output
 
@@ -93,20 +116,21 @@ Other VEP versions run with a warning.
 
 ## Merging Libraries
 
-Merge the h5ad files of several libraries into one AnnData.
-The `anndata.concat` function loses `var` annotation when the files hold different variants, so rebuild `var` from the inputs:
+Merge the h5ad files of several libraries into one AnnData:
 
 ```python
-import anndata as ad
-import pandas as pd
+import annatar
 
-libraries = {'a': ad.read_h5ad('a.h5ad'), 'b': ad.read_h5ad('b.h5ad')}
-adata = ad.concat(libraries, join='outer', label='library', index_unique='-')
-var = pd.concat([library.var for library in libraries.values()])
-adata.var = var[~var.index.duplicated()].reindex(adata.var_names)
+adata = annatar.concat({'a': 'a.h5ad', 'b': 'b.h5ad'})
 ```
 
-After merging, read counts in `var`, such as `alt_reads`, describe the first file with that variant.
+Cells become `barcode-library`, and `obs['library']` holds the library's name.
+A list names each file after its path, and AnnData objects work in place of paths.
+
+Every variant of every library keeps its annotation.
+The columns `n_cells_covered`, `n_cells_alt`, `ref_reads` and `alt_reads` are recounted from the merged layers.
+Any other `var` value on a shared variant, such as `qual` or an INFO field, comes from the first library holding it, and later libraries fill only the columns that library lacks entirely.
+A column that is text in one library and numeric in another stays text.
 The `X` matrix and the layers keep every stored value, since neither stores a zero.
 
 ## MuData Example
@@ -135,4 +159,4 @@ muon.pl.embedding(mu, basis='atac:X_umap', color='variants:TP53')
 
 ## Development and Testing
 
-See the [contributing guide](./CONTRIBUTING.md) for more information.
+See the [contributing guide](https://github.com/clintval/annatar/blob/main/CONTRIBUTING.md) for more information.
