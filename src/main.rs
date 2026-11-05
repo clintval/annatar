@@ -38,7 +38,7 @@ const CARGO_STYLING: Styles = Styles::styled()
 /// Convert a multi-sample VCF of single cells into an h5ad.
 ///
 /// Each VCF sample becomes a cell in `obs` and each ALT allele a variant in
-/// `var`. `X` holds the number of copies of this ALT in the called genotype;
+/// `var`. The `X` matrix holds the copies of this ALT in the called genotype;
 /// hom-ref and uncalled are not stored. Numeric FORMAT fields become sparse
 /// layers of plain counts, with zeros and missing values not stored.
 /// VEP annotation is optional: with `INFO/CSQ`, one consequence is picked per
@@ -86,8 +86,8 @@ struct Cli {
     /// Repeat the flag to leave out several, such as
     /// `INFO/CSQ/Existing_variation` and `INFO/CSQ/SOMATIC`. A name must match
     /// the header exactly: one it does not declare is an error, except that
-    /// `INFO/CSQ/subfield` only warns when there is no `INFO/CSQ`. `INFO/CSQ`
-    /// drops all annotation.
+    /// `INFO/CSQ/subfield` only warns when there is no `INFO/CSQ`. Excluding
+    /// `INFO/CSQ` drops all annotation.
     #[arg(long, value_name = "FIELD", verbatim_doc_comment)]
     exclude_field: Vec<Exclusion>,
 
