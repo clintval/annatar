@@ -84,11 +84,12 @@ When the VCF has `INFO/CSQ`, one consequence per variant is added to `var` with 
 Column types are fixed for VEP 116, so a column has the same type in every file.
 Other VEP versions run with a warning.
 
-Split multiallelic records before running VEP, not after.
-annatar stops on evidence of a split after VEP, including a `bcftools norm` split line in the header, even if no record changed.
-It cannot detect a split after `--pick` when neither `--allele_number` nor that header line is there.
-annatar refuses `--minimal` output, so run VEP without it.
-Pass `--allele_number` to VEP so symbolic ALTs and breakends match by position.
+> [!IMPORTANT]
+> Split multiallelic records before running VEP, not after.
+> annatar stops on evidence of a split after VEP, including a `bcftools norm` split line in the header, even if no record changed.
+> It cannot detect a split after `--pick` when neither `--allele_number` nor that header line is there.
+> annatar refuses `--minimal` output, so run VEP without it.
+> Pass `--allele_number` to VEP so symbolic ALTs and breakends match by position.
 
 ## Merging Libraries
 
