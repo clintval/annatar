@@ -162,7 +162,7 @@ variants.obs['TP53'] = np.select([alt > 0, ref > 0], ['carrier', 'reference only
 mu.pull_obs()
 colors = {
     'T cell': '#2a78d6', 'Monocyte': '#1baf7a', 'Tumor': '#e34948', 'B cell': '#104281', 'NK cell': '#eda100',
-    'carrier': '#4a3aa7', 'reference only': '#b5b1ab',
+    'carrier': '#e34948', 'reference only': '#b5b1ab',
 }
 muon.pl.embedding(
     mu,
