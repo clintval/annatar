@@ -12,7 +12,9 @@ fmt = "cargo fmt"
 fmt-check = "cargo fmt -- --check"
 lint = { cmd = "cargo clippy --all-targets --all-features -- -D warnings", env = { CARGO_BUILD_JOBS = "4" } }
 fixture-h5ad = { cmd = "cargo test --lib writes_fixture -- --ignored", env = { CARGO_BUILD_JOBS = "4" } }
-test-readback = { cmd = "pytest tests/python", depends-on = ["build", "fixture-h5ad"] }
+develop = { cmd = "maturin develop --release", env = { CARGO_BUILD_JOBS = "4" } }
+test-readback = { cmd = "pytest tests/python", depends-on = ["build", "develop", "fixture-h5ad"] }
+lint-python = "ruff format --check && ruff check && mypy"
 
 [dependencies]
 anndata = ">=0.10"
@@ -25,6 +27,10 @@ pytest = "*"
 python = "3.12.*"
 rust = ">=1.92"
 scanpy = "*"
+maturin = ">=1.15,<2"
+pip = ">=26.2.2,<27"
+ruff = ">=0.17.3,<0.18"
+mypy = ">=2.4.1,<3"
 
 [target.linux-64.dependencies]
 c-compiler = "*"

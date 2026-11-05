@@ -7,6 +7,7 @@ use std::process;
 
 use annatar::convert::{Config, convert};
 use annatar::fields::{Exclusion, Exclusions};
+use annatar::h5ad::write_output;
 use anyhow::Error;
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
 use clap::builder::{OsStringValueParser, TypedValueParser};
@@ -278,7 +279,6 @@ fn main() -> Result<(), Error> {
 
     let config = Config {
         input: cli.input,
-        output: cli.output,
         genes: cli.genes,
         mane_table: cli.mane_table,
         exclusions: Exclusions::new(cli.exclude_field),
@@ -289,13 +289,16 @@ fn main() -> Result<(), Error> {
             .join(" "),
     };
 
-    match convert(&config) {
-        Ok(summary) => {
+    let written = convert(&config).and_then(|output| {
+        let (cells, variants) = (output.obs_names.len(), output.var_names.len());
+        write_output(&cli.output, output)?;
+        Ok((cells, variants))
+    });
+    match written {
+        Ok((cells, variants)) => {
             info!(
-                "wrote {} cells and {} variants to {}",
-                summary.cells,
-                summary.variants,
-                config.output.display()
+                "wrote {cells} cells and {variants} variants to {}",
+                cli.output.display()
             );
             process::exit(0);
         }

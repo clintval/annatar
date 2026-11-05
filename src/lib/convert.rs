@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use log::{info, warn};
@@ -15,16 +14,15 @@ use noodles::vcf::variant::record_buf::samples::Series as SampleSeries;
 use noodles::vcf::variant::record_buf::samples::sample::Value as SampleValue;
 use noodles::vcf::variant::record_buf::samples::sample::value::Array as SampleArray;
 use noodles::vcf::variant::record_buf::samples::sample::value::genotype::Allele;
-use polars::prelude::{DataFrame, NamedFrom, Series};
 
 use crate::alleles::{is_skipped_alt, vep_alleles};
 use crate::consequence::{VEP_RELEASE, rank, vep_major};
 use crate::csq::{CsqEntry, CsqIndex, parse_entries};
 use crate::fields::{Exclusions, FieldPlan, FieldSpec, Kind, Section, Shape, plan_fields};
 use crate::genotype::copies_of_alt;
-use crate::h5ad::{Output, UnsValue, X_ENCODING, write_h5ad};
 use crate::input::{VariantSource, open_variants};
 use crate::matrix::{Cell, SparseBuilder};
+use crate::output::{Column, Output, UnsValue, X_ENCODING};
 use crate::pick::{
     AltAllele, Genes, Hashed, MINIMAL_OUTPUT, ManeTable, PickContext, Picked, entries_for_allele,
     missing_tie_fields, pick, read_genes, read_mane_table, worst_panel_impact,
@@ -46,7 +44,6 @@ const PICK_RULE: &str = "1. Keep this ALT's CSQ entries. Evidence of a split aft
 
 pub struct Config {
     pub input: PathBuf,
-    pub output: PathBuf,
     pub genes: Option<PathBuf>,
     pub mane_table: Option<PathBuf>,
     pub exclusions: Exclusions,
@@ -54,14 +51,7 @@ pub struct Config {
     pub command_line: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Summary {
-    pub cells: usize,
-    pub variants: usize,
-    pub skipped_alts: u64,
-}
-
-pub fn convert(config: &Config) -> anyhow::Result<Summary> {
+pub fn convert(config: &Config) -> anyhow::Result<Output> {
     check_required_fields(&config.exclusions)?;
     let genes = config.genes.as_deref().map(read_genes).transpose()?;
     let mane = config
@@ -131,36 +121,26 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
     } = conversion;
     let VarColumns {
         names: var_names,
-        frame: var,
-        nullable: nullable_var,
-    } = var.finish()?;
+        columns: var,
+    } = var.finish();
     let matrices = matrix.finish();
     for (field, count) in &matrices.missing {
         warn!("{field}: missing in {count} of the cells with reads");
     }
     warn_about_counts(skipped_alts, structural_without_entry, records_without_alt);
 
-    let summary = Summary {
-        cells: samples.len(),
-        variants: var_names.len(),
-        skipped_alts,
-    };
-    let obs = DataFrame::new_infer_height(vec![
-        Series::new("n_sites_covered".into(), n_sites_covered).into(),
-        Series::new("n_sites_alt".into(), n_sites_alt).into(),
-    ])?;
-    let output = Output {
+    Ok(Output {
         obs_names: samples,
-        obs,
+        obs: vec![
+            ("n_sites_covered".to_string(), Column::Int(n_sites_covered)),
+            ("n_sites_alt".to_string(), Column::Int(n_sites_alt)),
+        ],
         var_names,
         var,
-        nullable_var,
         x: matrices.x,
         layers: matrices.layers,
         uns,
-    };
-    write_output(&config.output, output)?;
-    Ok(summary)
+    })
 }
 
 fn warn_about_counts(skipped_alts: u64, structural_without_entry: u64, records_without_alt: u64) {
@@ -323,22 +303,6 @@ fn note_no_csq(config: &Config, header: &Header) {
     for flag in unused {
         warn!("{flag} does nothing: there is no INFO/CSQ to act on");
     }
-}
-
-fn partial_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".partial");
-    PathBuf::from(name)
-}
-
-fn write_output(path: &Path, output: Output) -> anyhow::Result<()> {
-    let partial = partial_path(path);
-    write_h5ad(&partial, output)
-        .and_then(|()| Ok(fs::rename(&partial, path)?))
-        .inspect_err(|_| {
-            let _ = fs::remove_file(&partial);
-        })
-        .with_context(|| format!("cannot write {}", path.display()))
 }
 
 fn provenance(
@@ -900,17 +864,5 @@ mod tests {
         let array = SampleValue::Array(SampleArray::Float(vec![Some(f32::NAN), Some(0.5), None]));
         assert_eq!(float_at(Some(&array), 0), None);
         assert_eq!(float_at(Some(&array), 1), Some(0.5));
-    }
-
-    #[test]
-    fn partial_files_keep_the_whole_output_name() {
-        assert_eq!(
-            partial_path(Path::new("dir/cells.1")),
-            Path::new("dir/cells.1.partial")
-        );
-        assert_ne!(
-            partial_path(Path::new("cells.1")),
-            partial_path(Path::new("cells.2"))
-        );
     }
 }

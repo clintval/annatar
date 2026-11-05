@@ -4,6 +4,7 @@ import warnings
 from pathlib import Path
 
 import anndata as ad
+import annatar
 import mudata as md
 import numpy as np
 import pandas as pd
@@ -493,14 +494,12 @@ def test_concat_of_different_variants_cannot_keep_the_annotation_alone(tmp_path)
 
 
 @pytest.mark.filterwarnings("ignore:The 'future.infer_string' option")
-def test_the_readme_concat_recipe_keeps_every_value(tmp_path):
+def test_annatar_concat_keeps_every_value(tmp_path):
     samples = concat_inputs(tmp_path, "csq-types-b.vcf")
-    adata = ad.concat(samples, join="outer", label="sample", index_unique="-")
-    var = pd.concat([sample.var for sample in samples.values()])
-    adata.var = var[~var.index.duplicated()].reindex(adata.var_names)
+    adata = annatar.concat(samples)
 
     assert adata.var["cDNA_position"].tolist() == ["1035", "862", "519-520"]
-    assert not isinstance(adata.var["cDNA_position"].dtype, pd.CategoricalDtype)
+    assert isinstance(adata.var["cDNA_position"].dtype, pd.CategoricalDtype)
     assert adata.var["Consequence"].notna().all()
     expected = dtypes(samples["a"])
     for column in ["STRAND", "consequence_rank", "is_lof", "REVEL_score", "pos", "alt_reads"]:

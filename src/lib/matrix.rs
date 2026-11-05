@@ -1,7 +1,7 @@
 use nalgebra_sparse::{CscMatrix, CsrMatrix};
 
 use crate::fields::Kind;
-use crate::h5ad::LayerMatrix;
+use crate::output::LayerMatrix;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Cell {

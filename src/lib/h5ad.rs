@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use anndata::backend::{
     AttributeOp, Compression, GroupOp, StoreOp, WriteConfig, set_default_write_config,
@@ -6,33 +7,32 @@ use anndata::backend::{
 use anndata::data::{DataFrameIndex, Writable};
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend, ElemCollectionOp};
 use anndata_hdf5::H5;
-use anyhow::{Result, bail};
-use nalgebra_sparse::CsrMatrix;
+use anyhow::{Context, Result, bail};
 use ndarray::Array1;
-use polars::prelude::{Column, DataFrame, DataType};
+use polars::prelude::{Categories, Column, DataFrame, DataType, NamedFrom, Series};
 
-pub enum LayerMatrix {
-    I32(CsrMatrix<i32>),
-    F32(CsrMatrix<f32>),
+use crate::output::{Column as OutputColumn, LayerMatrix, Output, UnsValue};
+
+fn series(name: &str, column: OutputColumn) -> Result<Column> {
+    let name = name.into();
+    Ok(match column {
+        OutputColumn::Int(values) => Series::new(name, values).into(),
+        OutputColumn::NullableInt(values) => Series::new(name, values).into(),
+        OutputColumn::Float(values) => Series::new(name, values).into(),
+        OutputColumn::Flag(values) => Series::new(name, values).into(),
+        OutputColumn::NullableFlag(values) => Series::new(name, values).into(),
+        OutputColumn::Text(values) => Series::new(name, values)
+            .cast(&DataType::from_categories(Categories::global()))?
+            .into(),
+    })
 }
 
-pub enum UnsValue {
-    Text(String),
-    List(Vec<String>),
-}
-
-pub const X_ENCODING: &str =
-    "number of copies of this ALT in the called genotype; hom-ref and uncalled are not stored";
-
-pub struct Output {
-    pub obs_names: Vec<String>,
-    pub obs: DataFrame,
-    pub var_names: Vec<String>,
-    pub var: DataFrame,
-    pub nullable_var: Vec<String>,
-    pub x: CsrMatrix<i8>,
-    pub layers: Vec<(String, LayerMatrix)>,
-    pub uns: Vec<(String, UnsValue)>,
+pub fn data_frame(columns: Vec<(String, OutputColumn)>) -> Result<DataFrame> {
+    let columns = columns
+        .into_iter()
+        .map(|(name, column)| series(&name, column))
+        .collect::<Result<Vec<Column>>>()?;
+    Ok(DataFrame::new_infer_height(columns)?)
 }
 
 fn write_nullable_column(var: &impl GroupOp<H5>, column: &Column) -> Result<()> {
@@ -78,23 +78,33 @@ pub fn write_h5ad(path: &Path, output: Output) -> Result<()> {
         compression: Some(Compression::Gzip(4)),
         block_size: None,
     });
-    let column_order: Vec<String> = output
+    let nullable_names: Vec<String> = output
         .var
+        .iter()
+        .filter(|(_, column)| {
+            matches!(
+                column,
+                OutputColumn::NullableInt(_) | OutputColumn::NullableFlag(_)
+            )
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    let var = data_frame(output.var)?;
+    let column_order: Vec<String> = var
         .get_column_names()
         .iter()
         .map(ToString::to_string)
         .collect();
-    let nullable = output
-        .nullable_var
+    let nullable = nullable_names
         .iter()
-        .map(|name| Ok(output.var.column(name)?.clone()))
+        .map(|name| Ok(var.column(name)?.clone()))
         .collect::<Result<Vec<Column>>>()?;
-    let plain_var = output.var.drop_many(&output.nullable_var);
+    let plain_var = var.drop_many(&nullable_names);
 
     let adata = AnnData::<H5>::new(path)?;
     adata.set_obs_names(DataFrameIndex::from(output.obs_names))?;
     adata.set_var_names(DataFrameIndex::from(output.var_names))?;
-    adata.set_obs(output.obs)?;
+    adata.set_obs(data_frame(output.obs)?)?;
     adata.set_var(plain_var)?;
     adata.set_x(output.x)?;
     for (name, matrix) in output.layers {
@@ -113,10 +123,27 @@ pub fn write_h5ad(path: &Path, output: Output) -> Result<()> {
     write_nullable_columns(path, &nullable, column_order)
 }
 
+fn partial_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".partial");
+    PathBuf::from(name)
+}
+
+pub fn write_output(path: &Path, output: Output) -> Result<()> {
+    let partial = partial_path(path);
+    write_h5ad(&partial, output)
+        .and_then(|()| Ok(fs::rename(&partial, path)?))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&partial);
+        })
+        .with_context(|| format!("cannot write {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polars::prelude::*;
+    use crate::output::X_ENCODING;
+    use nalgebra_sparse::CsrMatrix;
 
     fn csr<T>(entries: &[(usize, usize, T)]) -> CsrMatrix<T>
     where
@@ -137,22 +164,26 @@ mod tests {
     #[test]
     #[ignore = "writes tests/python/out/fixture.h5ad for the Python read-back"]
     fn writes_fixture() {
-        let symbol = Series::new("SYMBOL".into(), [Some("TP53"), None])
-            .cast(&DataType::from_categories(Categories::global()))
-            .unwrap();
-        let var = DataFrame::new_infer_height(vec![
-            symbol.into(),
-            Series::new("REVEL_score".into(), [0.5f64, f64::NAN]).into(),
-            Series::new("AC".into(), [Some(1i64), None]).into(),
-            Series::new("INDEL".into(), [false, true]).into(),
-        ])
-        .unwrap();
+        let var = vec![
+            (
+                "SYMBOL".to_string(),
+                OutputColumn::Text(vec![Some("TP53".into()), None]),
+            ),
+            (
+                "REVEL_score".to_string(),
+                OutputColumn::Float(vec![0.5, f64::NAN]),
+            ),
+            (
+                "AC".to_string(),
+                OutputColumn::NullableInt(vec![Some(1), None]),
+            ),
+            ("INDEL".to_string(), OutputColumn::Flag(vec![false, true])),
+        ];
         let output = Output {
             obs_names: vec!["c0".into(), "c1".into(), "c2".into()],
-            obs: DataFrame::empty(),
+            obs: Vec::new(),
             var_names: vec!["v0".into(), "v1".into()],
             var,
-            nullable_var: vec!["AC".into()],
             x: csr(&[(0, 0, 1i8), (2, 1, 3i8)]),
             layers: vec![
                 (
@@ -169,5 +200,17 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/python/out");
         std::fs::create_dir_all(&dir).unwrap();
         write_h5ad(&dir.join("fixture.h5ad"), output).unwrap();
+    }
+
+    #[test]
+    fn partial_files_keep_the_whole_output_name() {
+        assert_eq!(
+            partial_path(Path::new("dir/cells.1")),
+            Path::new("dir/cells.1.partial")
+        );
+        assert_ne!(
+            partial_path(Path::new("cells.1")),
+            partial_path(Path::new("cells.2"))
+        );
     }
 }
