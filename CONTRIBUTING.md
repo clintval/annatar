@@ -25,11 +25,11 @@ pixi run build
 pixi run test-readback
 ```
 
-- `fmt-check` verifies formatting with `cargo fmt -- --check`; `pixi run fmt` applies it.
-- `lint` runs clippy on all targets with warnings denied.
-- `test` runs the Rust unit and integration tests.
-- `build` compiles the release binary.
-- `test-readback` builds the release binary first, writes the fixture h5ad files, and reads every output back with Python `anndata`.
+- The `fmt-check` task verifies formatting with `cargo fmt -- --check`; `pixi run fmt` applies it.
+- The `lint` task runs clippy on all targets with warnings denied.
+- The `test` task runs the Rust unit and integration tests.
+- The `build` task compiles the release binary.
+- The `test-readback` task builds the release binary first, writes the fixture h5ad files, and reads every output back with Python `anndata`.
 
 ## Releases
 
