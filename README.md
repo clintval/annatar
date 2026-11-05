@@ -45,7 +45,7 @@ annatar \
     'cells.h5ad'
 ```
 
-Excluding `INFO/CSQ` drops all annotation. The fields `FORMAT/AD` and `FORMAT/GT` cannot be excluded.
+Excluding `INFO/CSQ` drops all VEP annotation.
 
 ## Python
 
