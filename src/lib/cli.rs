@@ -1,18 +1,16 @@
-//! Convert a multi-sample VCF of single cells into an `AnnData` h5ad.
+//! Argument parsing, help and usage errors for the `annatar` command.
 use std::ffi::{OsStr, OsString};
 use std::io::{IsTerminal, Write};
 use std::num::NonZero;
 use std::path::PathBuf;
-use std::process;
 
-use annatar::convert::{Config, convert};
-use annatar::fields::{Exclusion, Exclusions};
-use anyhow::Error;
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
 use clap::builder::{OsStringValueParser, TypedValueParser};
-use clap::{CommandFactory, FromArgMatches, Parser};
-use env_logger::Env;
-use log::{error, info};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use env_logger::{Env, Logger};
+
+use crate::convert::Config;
+use crate::fields::{Exclusion, Exclusions};
 
 const HEADER: Style = AnsiColor::Green.on_default().effects(Effects::BOLD);
 const USAGE: Style = AnsiColor::Green.on_default().effects(Effects::BOLD);
@@ -38,42 +36,98 @@ const CARGO_STYLING: Styles = Styles::styled()
 /// Convert a multi-sample VCF of single cells into an h5ad.
 ///
 /// Each VCF sample becomes a cell in `obs` and each ALT allele a variant in
-/// `var`. The `X` matrix holds the
-/// number of copies of this ALT in the called genotype; hom-ref and uncalled
-/// are not stored. Numeric FORMAT fields become sparse
-/// layers of plain counts, with zeros and missing values not stored.
-/// VEP annotation is optional: with `INFO/CSQ`, one consequence is picked per
-/// ALT and becomes typed `var` columns. The file is written once the whole VCF
-/// has been read, so a failed run leaves no output.
+/// `var`. The `X` matrix holds the number of copies of this ALT in the called
+/// genotype, capped at this ALT's read count, where a missing count is zero, and
+/// the `GT` layer holds them uncapped; hom-ref and uncalled are not stored.
+/// Numeric FORMAT fields become sparse layers of plain counts, with zeros and
+/// missing values not stored. VEP annotation is optional: with `INFO/CSQ`, one
+/// consequence is picked per ALT and becomes typed `var` columns. The file is
+/// written once the whole VCF has been read, so a failed run leaves no output.
 ///
 /// EXAMPLES
 ///
 ///   annatar 'cells.vcf.gz' 'cells.h5ad'
 ///   annatar --genes 'panel-genes.txt' 'cells.vep.vcf.gz' 'cells.h5ad'
 ///   bcftools view 'cells.bcf' | annatar - 'cells.h5ad'
+///   annatar merge --output 'merged.h5ad' 'a.h5ad' 'b.h5ad'
 #[derive(Debug, Parser)]
 #[command(
     author,
     version,
     rename_all = "kebab-case",
     verbatim_doc_comment,
-    arg_required_else_help = true
+    arg_required_else_help = true,
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true,
+    disable_help_subcommand = true
 )]
 #[clap(styles = CARGO_STYLING)]
 struct Cli {
-    /// Input VCF or BCF, plain or bgzipped, or `-` for standard input.
-    #[arg(value_name = "VCF", verbatim_doc_comment)]
-    input: PathBuf,
+    #[command(flatten)]
+    convert: ConvertArgs,
 
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    Merge(MergeArgs),
+}
+
+/// Merge annatar's h5ad files, one per library, into one h5ad.
+///
+/// Each input is one library, named after its file. Barcodes gain the library
+/// name, `obs["library"]` names the library, and variants are the union, sorted
+/// by VCF header contig order, `start`, `end`, `ref` and `alt`. A shared variant
+/// takes its whole `var` row from the first library holding it, and
+/// `n_cells_covered`, `n_cells_alt`, `ref_reads` and `alt_reads` are recounted
+/// from the merged layers. The file is written once every input has been read,
+/// so a failed run leaves no output.
+///
+/// EXAMPLES
+///
+///   annatar merge --output 'merged.h5ad' 'a.h5ad' 'b.h5ad'
+#[derive(Debug, Args)]
+#[command(
+    rename_all = "kebab-case",
+    verbatim_doc_comment,
+    arg_required_else_help = true
+)]
+struct MergeArgs {
     /// Output h5ad. HDF5 cannot stream, so this must be a path.
     #[arg(
+        short,
+        long,
         value_name = "H5AD",
         value_parser = OsStringValueParser::new().try_map(output_path),
         verbatim_doc_comment
     )]
     output: PathBuf,
 
-    /// Panel genes preferred by the pick, one HGNC symbol or Ensembl gene ID per
+    /// Input h5ad files written by annatar, one per library.
+    #[arg(value_name = "H5AD", required = true, verbatim_doc_comment)]
+    inputs: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ConvertArgs {
+    /// Input VCF or BCF, plain or bgzipped, or `-` for standard input.
+    ///
+    /// A file named `merge` must be written `./merge`.
+    #[arg(value_name = "VCF", required = true, verbatim_doc_comment)]
+    input: Option<PathBuf>,
+
+    /// Output h5ad. HDF5 cannot stream, so this must be a path.
+    #[arg(
+        value_name = "H5AD",
+        required = true,
+        value_parser = OsStringValueParser::new().try_map(output_path),
+        verbatim_doc_comment
+    )]
+    output: Option<PathBuf>,
+
+    /// Prioritize effects in this gene set, one HGNC symbol or Ensembl gene ID per
     /// line.
     #[arg(long, value_name = "FILE", verbatim_doc_comment)]
     genes: Option<PathBuf>,
@@ -124,14 +178,16 @@ fn rendered(error: &clap::Error, color: bool) -> String {
     }
 }
 
-fn exit_with(error: &clap::Error, stdout_color: bool, stderr_color: bool) -> ! {
-    // Writing directly ignores a closed pipe, which print! would turn into a panic.
-    let _ = if error.use_stderr() {
-        std::io::stderr().write_all(rendered(error, stderr_color).as_bytes())
+// Writing directly ignores a closed pipe, which print! would turn into a panic.
+fn report(error: &clap::Error, stdout_color: bool, stderr_color: bool) -> i32 {
+    let (mut stream, color): (Box<dyn Write>, bool) = if error.use_stderr() {
+        (Box::new(std::io::stderr()), stderr_color)
     } else {
-        std::io::stdout().write_all(rendered(error, stdout_color).as_bytes())
+        (Box::new(std::io::stdout()), stdout_color)
     };
-    process::exit(error.exit_code());
+    let _ = stream.write_all(rendered(error, color).as_bytes());
+    let _ = stream.flush();
+    error.exit_code()
 }
 
 fn title_first_line(text: &str) -> String {
@@ -230,7 +286,13 @@ fn decorate_help(cmd: clap::Command) -> clap::Command {
         FOOTER.render_reset(),
     );
 
-    let mut cmd = cmd;
+    let subcommands: Vec<String> = cmd
+        .get_subcommands()
+        .map(|subcommand| subcommand.get_name().to_string())
+        .collect();
+    let mut cmd = subcommands
+        .into_iter()
+        .fold(cmd, |cmd, name| cmd.mut_subcommand(name, decorate_help));
     if let Some(about) = about {
         cmd = cmd.about(title_first_line(&style_help_text(&about)));
     }
@@ -238,6 +300,8 @@ fn decorate_help(cmd: clap::Command) -> clap::Command {
         cmd = cmd.long_about(title_first_line(&style_help_text(&long_about)));
     }
     cmd = cmd
+        // Help text is hand-wrapped, and clap would count the injected ANSI escapes as width.
+        .term_width(usize::MAX)
         .next_line_help(true)
         .after_help(footer.clone())
         .after_long_help(footer);
@@ -252,58 +316,72 @@ fn decorate_help(cmd: clap::Command) -> clap::Command {
     })
 }
 
-#[cfg(not(tarpaulin_include))]
-fn main() -> Result<(), Error> {
-    let no_color = std::env::var_os("NO_COLOR");
-    let stdout_color = wants_color(no_color.as_deref(), std::io::stdout().is_terminal());
-    let stderr_color = wants_color(no_color.as_deref(), std::io::stderr().is_terminal());
+pub enum Invocation {
+    Convert {
+        config: Config,
+        output: PathBuf,
+    },
+    Merge {
+        inputs: Vec<PathBuf>,
+        output: PathBuf,
+    },
+}
 
-    let env = Env::default().default_filter_or("info");
-    let write_style = if stderr_color {
+pub struct Parsed {
+    pub invocation: Invocation,
+    pub logger: Logger,
+}
+
+fn stderr_logger(color: bool) -> Logger {
+    let write_style = if color {
         env_logger::WriteStyle::Always
     } else {
         env_logger::WriteStyle::Never
     };
-    env_logger::Builder::from_env(env)
+    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
         .write_style(write_style)
-        .init();
+        .build()
+}
 
-    // Help text is hand-wrapped, and clap would count the injected ANSI escapes as width.
-    let mut cmd = decorate_help(Cli::command().term_width(usize::MAX));
-    let matches = cmd
-        .try_get_matches_from_mut(std::env::args_os())
-        .unwrap_or_else(|e| exit_with(&e, stdout_color, stderr_color));
-    let cli = Cli::from_arg_matches(&matches)
-        .unwrap_or_else(|e| exit_with(&e, stdout_color, stderr_color));
+/// Parses `args`, or renders help or a usage error and returns the exit code.
+pub fn parse(args: &[OsString]) -> Result<Parsed, i32> {
+    let no_color = std::env::var_os("NO_COLOR");
+    let stdout_color = wants_color(no_color.as_deref(), std::io::stdout().is_terminal());
+    let stderr_color = wants_color(no_color.as_deref(), std::io::stderr().is_terminal());
 
-    let config = Config {
-        input: cli.input,
-        output: cli.output,
-        genes: cli.genes,
-        mane_table: cli.mane_table,
-        exclusions: Exclusions::new(cli.exclude_field),
-        threads: cli.threads,
-        command_line: std::env::args_os()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" "),
+    let mut cmd = decorate_help(Cli::command());
+    let cli = cmd
+        .try_get_matches_from_mut(args)
+        .and_then(|matches| Cli::from_arg_matches(&matches))
+        .map_err(|error| report(&error, stdout_color, stderr_color))?;
+
+    let invocation = if let Some(Command::Merge(args)) = cli.command {
+        Invocation::Merge {
+            inputs: args.inputs,
+            output: args.output,
+        }
+    } else {
+        let convert = cli.convert;
+        Invocation::Convert {
+            config: Config {
+                input: convert.input.expect("clap requires the input"),
+                genes: convert.genes,
+                mane_table: convert.mane_table,
+                exclusions: Exclusions::new(convert.exclude_field),
+                threads: convert.threads,
+                command_line: args
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            },
+            output: convert.output.expect("clap requires the output"),
+        }
     };
-
-    match convert(&config) {
-        Ok(summary) => {
-            info!(
-                "wrote {} cells and {} variants to {}",
-                summary.cells,
-                summary.variants,
-                config.output.display()
-            );
-            process::exit(0);
-        }
-        Err(e) => {
-            error!("{e:#}");
-            process::exit(1);
-        }
-    }
+    Ok(Parsed {
+        invocation,
+        logger: stderr_logger(stderr_color),
+    })
 }
 
 #[cfg(test)]

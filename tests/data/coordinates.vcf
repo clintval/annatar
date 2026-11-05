@@ -1,0 +1,15 @@
+##fileformat=VCFv4.3
+##contig=<ID=chr1,length=100000>
+##contig=<ID=chr2,length=100000>
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position">
+##ALT=<ID=DEL,Description="Deletion">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	c1
+chr1	100	.	A	G	50	PASS	.	GT:AD	0/1:5,3
+chr1	200	.	TTC	T	50	PASS	.	GT:AD	0/1:5,3
+chr1	300	.	A	ACGT	50	PASS	.	GT:AD	0/1:5,3
+chr1	400	.	A	<DEL>	50	PASS	END=500	GT:AD	0/1:5,3
+chr1	600	.	C	<DEL>	50	PASS	.	GT:AD	0/1:5,3
+chr1	700	.	G	G]chr2:50]	50	PASS	.	GT:AD	0/1:5,3
+chr1	800	.	TA	T,<DEL>	50	PASS	END=950	GT:AD	0/1:2,1,1

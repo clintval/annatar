@@ -11,47 +11,35 @@ description = "Convert a multi-sample VCF of single cells into an AnnData h5ad."
 categories = ["command-line-utilities", "science"]
 keywords = ["bioinformatics", "VCF", "single-cell", "AnnData", "VEP"]
 publish = false
-exclude = [".github/", "pixi.lock", "pixi.toml"]
+exclude = [".github/", "docs/", "pixi.lock", "pixi.toml"]
 
 [profile.release]
 codegen-units = 16
 lto = "thin"
 
-[profile.dist]
-inherits = "release"
-codegen-units = 1
-lto = "fat"
-debug = 0
-incremental = false
-strip = true
-
 [lib]
 name = "annatar"
 path = "src/lib/mod.rs"
 
-[[bin]]
-name = "annatar"
-path = "src/main.rs"
+[features]
+python = ["dep:numpy", "dep:pyo3"]
 
 [dependencies]
-anndata = "0.8"
-anndata-hdf5 = "0.5"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 env_logger = "0.11"
 flate2 = "1"
 log = "0.4"
 nalgebra-sparse = "0.11"
-ndarray = "0.17"
 noodles = { version = "0.116", features = ["bcf", "bgzf", "core", "vcf"] }
 noodles-bgzf = { version = "0.51", features = ["libdeflate"] }
+numpy = { version = "0.29", optional = true }
 percent-encoding = "2.3.2"
-polars = { version = "0.55", default-features = false, features = ["dtype-categorical"] }
+pyo3 = { version = "0.29", features = ["abi3-py311"], optional = true }
 sha2 = "0.11"
+spillsort = "0.2"
 
 [dev-dependencies]
-assert_cmd = "2"
-predicates = "3"
 rstest = "0.28.0"
 tempfile = "3"
 

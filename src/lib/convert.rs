@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use log::{info, warn};
@@ -15,16 +14,15 @@ use noodles::vcf::variant::record_buf::samples::Series as SampleSeries;
 use noodles::vcf::variant::record_buf::samples::sample::Value as SampleValue;
 use noodles::vcf::variant::record_buf::samples::sample::value::Array as SampleArray;
 use noodles::vcf::variant::record_buf::samples::sample::value::genotype::Allele;
-use polars::prelude::{DataFrame, NamedFrom, Series};
 
-use crate::alleles::{is_skipped_alt, vep_alleles};
+use crate::alleles::{is_skipped_alt, is_structural, vep_alleles};
 use crate::consequence::{VEP_RELEASE, rank, vep_major};
 use crate::csq::{CsqEntry, CsqIndex, parse_entries};
 use crate::fields::{Exclusions, FieldPlan, FieldSpec, Kind, Section, Shape, plan_fields};
-use crate::genotype::copies_of_alt;
-use crate::h5ad::{Output, UnsValue, X_ENCODING, write_h5ad};
+use crate::genotype::{capped_copies, copies_of_alt};
 use crate::input::{VariantSource, open_variants};
 use crate::matrix::{Cell, SparseBuilder};
+use crate::output::{Column, Output, UnsValue, X_ENCODING};
 use crate::pick::{
     AltAllele, Genes, Hashed, MINIMAL_OUTPUT, ManeTable, PickContext, Picked, entries_for_allele,
     missing_tie_fields, pick, read_genes, read_mane_table, worst_panel_impact,
@@ -46,7 +44,6 @@ const PICK_RULE: &str = "1. Keep this ALT's CSQ entries. Evidence of a split aft
 
 pub struct Config {
     pub input: PathBuf,
-    pub output: PathBuf,
     pub genes: Option<PathBuf>,
     pub mane_table: Option<PathBuf>,
     pub exclusions: Exclusions,
@@ -54,14 +51,7 @@ pub struct Config {
     pub command_line: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Summary {
-    pub cells: usize,
-    pub variants: usize,
-    pub skipped_alts: u64,
-}
-
-pub fn convert(config: &Config) -> anyhow::Result<Summary> {
+pub fn convert(config: &Config) -> anyhow::Result<Output> {
     check_required_fields(&config.exclusions)?;
     let genes = config.genes.as_deref().map(read_genes).transpose()?;
     let mane = config
@@ -80,7 +70,7 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
     check_header(&header, &header_lines, csq.as_ref(), &config.exclusions)?;
     let plan = plan_fields(&header, &config.exclusions);
     check_layer_names(&plan)?;
-    let uns = provenance(
+    let mut uns = provenance(
         config,
         &header,
         csq.as_ref(),
@@ -94,7 +84,8 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
         genes: genes.as_ref().map(|genes| &genes.value),
         mane: mane.as_ref().map(|mane| &mane.value),
     };
-    let mut conversion = Conversion::new(&plan, lookups, &config.exclusions, samples.len());
+    let has_gt = header.formats().contains_key("GT");
+    let mut conversion = Conversion::new(&plan, lookups, &config.exclusions, samples.len(), has_gt);
     if let Some(name) = conversion.var.duplicate_column() {
         bail!("two fields make the var column {name}");
     }
@@ -111,8 +102,14 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
         warn!("--mane-table is ignored: the VCF declares MANE_SELECT or MANE_PLUS_CLINICAL");
     }
 
+    let mut contigs: Vec<String> = header.contigs().keys().cloned().collect();
+    let contigs_are_listed = !contigs.is_empty();
     for record in records {
         let record = record?;
+        let contig = record.reference_sequence_name();
+        if !contigs_are_listed && !contigs.iter().any(|seen| seen == contig) {
+            contigs.push(contig.to_string());
+        }
         conversion.push_record(&record).with_context(|| {
             let position = record.variant_start().map_or(0, usize::from);
             format!("{}:{position}", record.reference_sequence_name())
@@ -131,36 +128,27 @@ pub fn convert(config: &Config) -> anyhow::Result<Summary> {
     } = conversion;
     let VarColumns {
         names: var_names,
-        frame: var,
-        nullable: nullable_var,
-    } = var.finish()?;
+        columns: var,
+    } = var.finish();
     let matrices = matrix.finish();
     for (field, count) in &matrices.missing {
         warn!("{field}: missing in {count} of the cells with reads");
     }
     warn_about_counts(skipped_alts, structural_without_entry, records_without_alt);
+    uns.push(("contigs".to_string(), UnsValue::List(contigs)));
 
-    let summary = Summary {
-        cells: samples.len(),
-        variants: var_names.len(),
-        skipped_alts,
-    };
-    let obs = DataFrame::new_infer_height(vec![
-        Series::new("n_sites_covered".into(), n_sites_covered).into(),
-        Series::new("n_sites_alt".into(), n_sites_alt).into(),
-    ])?;
-    let output = Output {
+    Ok(Output {
         obs_names: samples,
-        obs,
+        obs: vec![
+            ("n_sites_covered".to_string(), Column::Int(n_sites_covered)),
+            ("n_sites_alt".to_string(), Column::Int(n_sites_alt)),
+        ],
         var_names,
         var,
-        nullable_var,
         x: matrices.x,
         layers: matrices.layers,
         uns,
-    };
-    write_output(&config.output, output)?;
-    Ok(summary)
+    })
 }
 
 fn warn_about_counts(skipped_alts: u64, structural_without_entry: u64, records_without_alt: u64) {
@@ -323,22 +311,6 @@ fn note_no_csq(config: &Config, header: &Header) {
     for flag in unused {
         warn!("{flag} does nothing: there is no INFO/CSQ to act on");
     }
-}
-
-fn partial_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".partial");
-    PathBuf::from(name)
-}
-
-fn write_output(path: &Path, output: Output) -> anyhow::Result<()> {
-    let partial = partial_path(path);
-    write_h5ad(&partial, output)
-        .and_then(|()| Ok(fs::rename(&partial, path)?))
-        .inspect_err(|_| {
-            let _ = fs::remove_file(&partial);
-        })
-        .with_context(|| format!("cannot write {}", path.display()))
 }
 
 fn provenance(
@@ -678,6 +650,16 @@ struct Conversion<'a> {
     unranked_terms: HashSet<String>,
 }
 
+// A 1-based inclusive INFO/END is the same number as a half-open end.
+fn span_end(record: &RecordBuf, pos: usize, alt: &str) -> anyhow::Result<i64> {
+    if is_structural(alt)
+        && let Some(Some(InfoField::Integer(end))) = record.info().get("END")
+    {
+        return Ok(i64::from(*end));
+    }
+    Ok(i64::try_from(pos + record.reference_bases().len())? - 1)
+}
+
 fn svtype(record: &RecordBuf) -> Option<&str> {
     match record.info().get("SVTYPE").flatten() {
         Some(InfoField::String(svtype)) => Some(svtype),
@@ -691,6 +673,7 @@ impl<'a> Conversion<'a> {
         lookups: Lookups<'a>,
         exclusions: &Exclusions,
         n_obs: usize,
+        has_gt: bool,
     ) -> Self {
         let layers: Vec<(String, Kind)> = plan
             .format
@@ -701,6 +684,7 @@ impl<'a> Conversion<'a> {
                     .map(|name| (name, spec.kind))
             })
             .collect();
+        let matrix = SparseBuilder::new(n_obs, &layers);
         Self {
             plan,
             lookups,
@@ -710,7 +694,11 @@ impl<'a> Conversion<'a> {
                 exclusions,
                 lookups.csq.is_some() && lookups.genes.is_some(),
             ),
-            matrix: SparseBuilder::new(n_obs, &layers),
+            matrix: if has_gt {
+                matrix.with_called_copies()
+            } else {
+                matrix
+            },
             n_sites_covered: vec![0; n_obs],
             n_sites_alt: vec![0; n_obs],
             skipped_alts: 0,
@@ -735,6 +723,7 @@ impl<'a> Conversion<'a> {
             self.records_without_alt += 1;
         }
 
+        let pos = record.variant_start().map_or(0, usize::from);
         for (position, (alt, spelling)) in alts.iter().zip(&vep).enumerate() {
             if is_skipped_alt(alt) {
                 self.skipped_alts += 1;
@@ -755,7 +744,8 @@ impl<'a> Conversion<'a> {
             let totals = self.push_column(&samples, position);
             let row = RecordRow {
                 chrom: record.reference_sequence_name().to_string(),
-                pos: record.variant_start().map_or(0, usize::from),
+                pos,
+                end: span_end(record, pos, alt)?,
                 reference: record.reference_bases().to_string(),
                 alt: alt.clone(),
                 id: joined(record.ids().as_ref()),
@@ -808,9 +798,11 @@ impl<'a> Conversion<'a> {
 
         for (row, sample) in (0u32..).zip(0..n_obs) {
             samples.fill_alleles(sample, &mut alleles);
-            self.matrix
-                .push_copies(row, copies_of_alt(&alleles, allele));
             let depths = samples.allelic_depths(sample);
+            let reads = depths.get(allele).copied().flatten();
+            let copies = copies_of_alt(&alleles, allele);
+            self.matrix.push_called(row, copies);
+            self.matrix.push_copies(row, capped_copies(copies, reads));
             let has_reads = depths.iter().flatten().any(|reads| *reads > 0);
             for (slot, &(layer, position, kind)) in slots.iter().enumerate() {
                 let cell = samples.cell(layer, sample, position, kind);
@@ -900,17 +892,5 @@ mod tests {
         let array = SampleValue::Array(SampleArray::Float(vec![Some(f32::NAN), Some(0.5), None]));
         assert_eq!(float_at(Some(&array), 0), None);
         assert_eq!(float_at(Some(&array), 1), Some(0.5));
-    }
-
-    #[test]
-    fn partial_files_keep_the_whole_output_name() {
-        assert_eq!(
-            partial_path(Path::new("dir/cells.1")),
-            Path::new("dir/cells.1.partial")
-        );
-        assert_ne!(
-            partial_path(Path::new("cells.1")),
-            partial_path(Path::new("cells.2"))
-        );
     }
 }

@@ -1,5 +1,6 @@
 target/
 .pixi/
-tests/python/out/
 __pycache__/
 .pytest_cache/
+*.so
+tests/python/out/

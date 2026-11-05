@@ -4,16 +4,21 @@ import warnings
 from pathlib import Path
 
 import anndata as ad
+import annatar
 import mudata as md
 import numpy as np
 import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-REPO = Path(__file__).resolve().parents[2]
-BINARY = REPO / "target" / "release" / "annatar"
-DATA = REPO / "tests" / "data"
-X_ENCODING = "number of copies of this ALT in the called genotype; hom-ref and uncalled are not stored"
+from conftest import BINARY
+from conftest import DATA
+
+X_ENCODING = (
+    "number of copies of this ALT in the called genotype, capped at this ALT's read count, "
+    "where a missing count is zero, with layers['GT'] uncapped; "
+    "hom-ref and uncalled are not stored"
+)
 
 
 def read(path):
@@ -48,22 +53,22 @@ def assert_same_tables(left, right):
     pd.testing.assert_frame_equal(left.obs, right.obs)
 
 
-def test_fixture_encodings(fixture_path):
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        warnings.filterwarnings("ignore", message=".*future.infer_string.*")
-        a = ad.read_h5ad(fixture_path)
-        assert a.shape == (3, 2) and a.X.dtype == np.int8 and sp.issparse(a.X)
-        assert a.layers["AD_alt"].nnz == 2 and a.layers["AD_alt"][0, 0] == 2
-        assert a.layers["VAF"].toarray()[0, 0] == 0.5
-        assert isinstance(a.var["SYMBOL"].dtype, pd.CategoricalDtype)
-        assert pd.isna(a.var["SYMBOL"].iloc[1])
-        assert np.isnan(a.var["REVEL_score"].iloc[1])
-        assert str(a.var["AC"].dtype) == "Int64" and pd.isna(a.var["AC"].iloc[1])
-        assert a.var["INDEL"].dtype == bool
-        assert a.uns["x_encoding"] == X_ENCODING
-        assert a.uns["source_vcf"] == "in.vcf"
+def test_output_encodings(tmp_path):
+    a = convert(tmp_path, "basic.vcf")
+    assert a.shape == (3, 5) and a.X.dtype == np.int8 and sp.issparse(a.X)
+    assert a.layers["AD_alt"].dtype == np.int32 and a.layers["AD_alt"][0, 0] == 3
+    assert isinstance(a.var["SYMBOL"].dtype, pd.CategoricalDtype)
+    assert pd.isna(a.var["ClinVar_CLNSIG"].iloc[0])
+    assert np.isnan(a.var["REVEL_score"].iloc[0])
+    assert str(a.var["consequence_rank"].dtype) == "Int64"
+    assert str(a.var["is_lof"].dtype) == "boolean"
+    assert a.uns["x_encoding"] == X_ENCODING
+    assert a.uns["source_vcf"] == "basic.vcf"
     md.MuData({"variants": a})
+    typed = convert(tmp_path, "typed-fields.vcf")
+    assert typed.layers["VAF"].dtype == np.float32
+    assert str(typed.var["AC"].dtype) == "Int64" and pd.isna(typed.var["AC"].iloc[4])
+    assert typed.var["SOLO"].dtype == bool
 
 
 def test_multiallelic_gives_one_column_per_alt(tmp_path):
@@ -197,7 +202,7 @@ def test_x_is_copies_of_this_alt_in_the_called_genotype(tmp_path):
     assert a.X.dtype == np.int8
     assert (a.X.data == 0).sum() == 0
     g, t = a.var_names.get_loc("chr1:100:A:G"), a.var_names.get_loc("chr1:100:A:T")
-    assert dense(a.X)[:, g].tolist() == [1, 2, 1, 3, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0]
+    assert dense(a.X)[:, g].tolist() == [1, 2, 1, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     assert dense(a.X)[:, t].tolist() == [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
 
 
@@ -434,7 +439,7 @@ def test_integer_and_boolean_columns_follow_whether_they_can_be_missing(tmp_path
     types = dtypes(convert(tmp_path, name))
     for column in ["consequence_rank", "DP", "AC", "STRAND", "DISTANCE"]:
         assert types[column] == "Int64", column
-    for column in ["pos", "n_cells_covered", "n_cells_alt", "ref_reads", "alt_reads"]:
+    for column in ["start", "end", "n_cells_covered", "n_cells_alt", "ref_reads", "alt_reads"]:
         assert types[column] == "int64", column
     for column in ["is_coding", "is_lof"]:
         assert types[column] == "boolean", column
@@ -450,7 +455,7 @@ def test_is_coding_and_is_lof_are_missing_where_nothing_was_picked(tmp_path):
 def test_nullable_columns_keep_the_var_column_order(tmp_path):
     a = convert(tmp_path, "dtypes-complete.vcf")
     names = list(a.var.columns)
-    assert names[:4] == ["chrom", "pos", "ref", "alt"]
+    assert names[:5] == ["chrom", "start", "end", "ref", "alt"]
     assert names.index("consequence_rank") < names.index("is_coding") < names.index("is_lof") < names.index("pick_tier")
     assert names.index("STRAND") < names.index("DISTANCE") < names.index("REVEL_score") < names.index("consequence_rank")
     assert names[-5:] == ["DP", "AC", "SCORE", "NOTE", "SOLO"]
@@ -489,21 +494,19 @@ def test_concat_of_different_variants_cannot_keep_the_annotation_alone(tmp_path)
     first = ad.concat(samples, join="outer", merge="first", index_unique="-")
     assert set(first.var_names) == {"chr1:100:G:A", "chr1:200:C:T", "chr1:300:CA:C"}
     assert first.var["SYMBOL"].isna().tolist() == [False, False, True]
-    assert first.var["pos"].dtype == np.float64
+    assert first.var["start"].dtype == np.float64
 
 
 @pytest.mark.filterwarnings("ignore:The 'future.infer_string' option")
-def test_the_readme_concat_recipe_keeps_every_value(tmp_path):
+def test_annatar_concat_keeps_every_value(tmp_path):
     samples = concat_inputs(tmp_path, "csq-types-b.vcf")
-    adata = ad.concat(samples, join="outer", label="sample", index_unique="-")
-    var = pd.concat([sample.var for sample in samples.values()])
-    adata.var = var[~var.index.duplicated()].reindex(adata.var_names)
+    adata = annatar.concat(samples)
 
     assert adata.var["cDNA_position"].tolist() == ["1035", "862", "519-520"]
-    assert not isinstance(adata.var["cDNA_position"].dtype, pd.CategoricalDtype)
+    assert isinstance(adata.var["cDNA_position"].dtype, pd.CategoricalDtype)
     assert adata.var["Consequence"].notna().all()
     expected = dtypes(samples["a"])
-    for column in ["STRAND", "consequence_rank", "is_lof", "REVEL_score", "pos", "alt_reads"]:
+    for column in ["STRAND", "consequence_rank", "is_lof", "REVEL_score", "start", "alt_reads"]:
         assert dtypes(adata)[column] == expected[column], column
 
     output = tmp_path / "concat.h5ad"

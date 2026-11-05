@@ -2,18 +2,18 @@ use std::collections::HashSet;
 
 use anyhow::bail;
 
-use polars::prelude::{Categories, Column, DataFrame, DataType, NamedFrom, Series};
-
 use crate::alleles::variant_name;
 use crate::consequence::{is_coding, is_lof, most_severe};
 use crate::csq::{CsqEntry, CsqIndex, is_missing};
 use crate::fields::{Exclusions, FieldSpec, Kind, Section};
+use crate::output::Column;
 use crate::pick::Tier;
 use crate::text::{CsqColumn, type_column};
 
-const RECORD_NAMES: [&str; 11] = [
+const RECORD_NAMES: [&str; 12] = [
     "chrom",
-    "pos",
+    "start",
+    "end",
     "ref",
     "alt",
     "id",
@@ -45,6 +45,7 @@ pub enum InfoValue {
 pub struct RecordRow {
     pub chrom: String,
     pub pos: usize,
+    pub end: i64,
     pub reference: String,
     pub alt: String,
     pub id: Option<String>,
@@ -83,13 +84,13 @@ impl InfoColumn {
         }
     }
 
-    fn into_column(self, name: &str) -> anyhow::Result<Column> {
-        Ok(match self {
-            Self::Int(v) => Series::new(name.into(), v).into(),
-            Self::Float(v) => Series::new(name.into(), v).into(),
-            Self::Flag(v) => Series::new(name.into(), v).into(),
-            Self::Text(v) => categorical(name, v)?,
-        })
+    fn into_column(self) -> Column {
+        match self {
+            Self::Int(v) => Column::NullableInt(v),
+            Self::Float(v) => Column::Float(v),
+            Self::Flag(v) => Column::Flag(v),
+            Self::Text(v) => Column::Text(v),
+        }
     }
 }
 
@@ -99,16 +100,9 @@ pub fn widen(value: f32) -> f64 {
         .unwrap_or_else(|_| f64::from(value))
 }
 
-fn categorical(name: &str, values: Vec<Option<String>>) -> anyhow::Result<Column> {
-    Ok(Series::new(name.into(), values)
-        .cast(&DataType::from_categories(Categories::global()))?
-        .into())
-}
-
 pub struct VarColumns {
     pub names: Vec<String>,
-    pub frame: DataFrame,
-    pub nullable: Vec<String>,
+    pub columns: Vec<(String, Column)>,
 }
 
 pub struct VarTable {
@@ -120,7 +114,8 @@ pub struct VarTable {
     names: Vec<String>,
     seen: HashSet<String>,
     chrom: Vec<Option<String>>,
-    pos: Vec<i64>,
+    start: Vec<i64>,
+    end: Vec<i64>,
     reference: Vec<Option<String>>,
     alt: Vec<Option<String>>,
     id: Vec<Option<String>>,
@@ -181,7 +176,8 @@ impl VarTable {
             names: Vec::new(),
             seen: HashSet::new(),
             chrom: Vec::new(),
-            pos: Vec::new(),
+            start: Vec::new(),
+            end: Vec::new(),
             reference: Vec::new(),
             alt: Vec::new(),
             id: Vec::new(),
@@ -229,7 +225,7 @@ impl VarTable {
                 "variant {name} appears more than once; remove repeats with bcftools norm -d exact"
             );
         }
-        let pos = i64::try_from(row.pos)?;
+        let start = i64::try_from(row.pos)? - 1;
         let ref_reads = i64::try_from(row.ref_reads)?;
         let alt_reads = i64::try_from(row.alt_reads)?;
 
@@ -247,7 +243,8 @@ impl VarTable {
         self.seen.insert(name.clone());
         self.names.push(name);
         self.chrom.push(Some(row.chrom));
-        self.pos.push(pos);
+        self.start.push(start);
+        self.end.push(row.end);
         self.reference.push(Some(row.reference));
         self.alt.push(Some(row.alt));
         self.id.push(row.id);
@@ -283,56 +280,62 @@ impl VarTable {
         entry.get(self.csq.as_ref()?, "Consequence")
     }
 
-    pub fn finish(self) -> anyhow::Result<VarColumns> {
-        let mut nullable = Vec::new();
-        let mut columns: Vec<Column> = vec![
-            categorical("chrom", self.chrom)?,
-            Series::new("pos".into(), self.pos).into(),
-            categorical("ref", self.reference)?,
-            categorical("alt", self.alt)?,
-            categorical("id", self.id)?,
-            Series::new("qual".into(), self.qual).into(),
-            categorical("filter", self.filter)?,
-            Series::new("n_cells_covered".into(), self.n_cells_covered).into(),
-            Series::new("n_cells_alt".into(), self.n_cells_alt).into(),
-            Series::new("ref_reads".into(), self.ref_reads).into(),
-            Series::new("alt_reads".into(), self.alt_reads).into(),
+    pub fn finish(self) -> VarColumns {
+        let record = [
+            ("chrom", Column::Text(self.chrom)),
+            ("start", Column::Int(self.start)),
+            ("end", Column::Int(self.end)),
+            ("ref", Column::Text(self.reference)),
+            ("alt", Column::Text(self.alt)),
+            ("id", Column::Text(self.id)),
+            ("qual", Column::Float(self.qual)),
+            ("filter", Column::Text(self.filter)),
+            ("n_cells_covered", Column::Int(self.n_cells_covered)),
+            ("n_cells_alt", Column::Int(self.n_cells_alt)),
+            ("ref_reads", Column::Int(self.ref_reads)),
+            ("alt_reads", Column::Int(self.alt_reads)),
         ];
+        let mut columns: Vec<(String, Column)> = record
+            .into_iter()
+            .map(|(name, column)| (name.to_string(), column))
+            .collect();
 
         for (name, values) in self.csq_columns {
-            columns.push(match type_column(&name, values) {
-                CsqColumn::Integer(values) => {
-                    nullable.push(name.clone());
-                    Series::new(name.as_str().into(), values).into()
-                }
-                CsqColumn::Float(values) => Series::new(name.as_str().into(), values).into(),
-                CsqColumn::Text(values) => categorical(&name, values)?,
-            });
+            let column = match type_column(&name, values) {
+                CsqColumn::Integer(values) => Column::NullableInt(values),
+                CsqColumn::Float(values) => Column::Float(values),
+                CsqColumn::Text(values) => Column::Text(values),
+            };
+            columns.push((name, column));
         }
 
         if self.csq.is_some() {
-            nullable.extend(["consequence_rank", "is_coding", "is_lof"].map(String::from));
-            columns.push(Series::new("consequence_rank".into(), self.consequence_rank).into());
-            columns.push(Series::new("is_coding".into(), self.is_coding).into());
-            columns.push(Series::new("is_lof".into(), self.is_lof).into());
-            columns.push(categorical("pick_tier", self.pick_tier)?);
+            let derived = [
+                (
+                    "consequence_rank",
+                    Column::NullableInt(self.consequence_rank),
+                ),
+                ("is_coding", Column::NullableFlag(self.is_coding)),
+                ("is_lof", Column::NullableFlag(self.is_lof)),
+                ("pick_tier", Column::Text(self.pick_tier)),
+            ];
+            columns.extend(derived.map(|(name, column)| (name.to_string(), column)));
             if self.with_genes {
-                columns.push(categorical("worst_panel_impact", self.worst_panel_impact)?);
+                columns.push((
+                    "worst_panel_impact".to_string(),
+                    Column::Text(self.worst_panel_impact),
+                ));
             }
         }
 
         for (name, column) in self.info {
-            if matches!(column, InfoColumn::Int(_)) {
-                nullable.push(name.clone());
-            }
-            columns.push(column.into_column(&name)?);
+            columns.push((name, column.into_column()));
         }
 
-        Ok(VarColumns {
+        VarColumns {
             names: self.names,
-            frame: DataFrame::new_infer_height(columns)?,
-            nullable,
-        })
+            columns,
+        }
     }
 }
 
@@ -341,9 +344,6 @@ mod tests {
     use super::*;
     use crate::consequence::rank;
     use crate::fields::Shape;
-    use crate::h5ad::{Output, write_h5ad};
-    use nalgebra_sparse::CsrMatrix;
-    use polars::prelude::AnyValue;
 
     fn spec(id: &str, shape: Shape, kind: Kind) -> FieldSpec {
         FieldSpec {
@@ -377,9 +377,9 @@ mod tests {
 
     #[test]
     fn a_csq_subfield_named_like_a_record_column_is_a_duplicate() {
-        let csq = index(&["Allele", "pos"]);
+        let csq = index(&["Allele", "start"]);
         let table = VarTable::new(&[], Some(&csq), &Exclusions::default(), false);
-        assert_eq!(table.duplicate_column(), Some("pos"));
+        assert_eq!(table.duplicate_column(), Some("start"));
     }
 
     #[test]
@@ -395,6 +395,7 @@ mod tests {
         RecordRow {
             chrom: "chr1".into(),
             pos,
+            end: i64::try_from(pos).unwrap(),
             reference: "A".into(),
             alt: alt.into(),
             id: None,
@@ -407,31 +408,80 @@ mod tests {
         }
     }
 
-    fn is_categorical(column: &Column) -> bool {
-        matches!(column.dtype(), DataType::Categorical(..))
+    fn column<'a>(columns: &'a VarColumns, name: &str) -> &'a Column {
+        let found = columns.columns.iter().find(|(other, _)| other == name);
+        &found.unwrap_or_else(|| panic!("no column {name}")).1
     }
 
-    fn names(df: &DataFrame) -> Vec<String> {
-        df.get_column_names()
+    fn is_text(columns: &VarColumns, name: &str) -> bool {
+        matches!(column(columns, name), Column::Text(_))
+    }
+
+    fn ints(columns: &VarColumns, name: &str) -> Vec<Option<i64>> {
+        match column(columns, name) {
+            Column::Int(values) => values.iter().copied().map(Some).collect(),
+            Column::NullableInt(values) => values.clone(),
+            _ => panic!("{name} is not an integer column"),
+        }
+    }
+
+    fn flags(columns: &VarColumns, name: &str) -> Vec<Option<bool>> {
+        match column(columns, name) {
+            Column::Flag(values) => values.iter().copied().map(Some).collect(),
+            Column::NullableFlag(values) => values.clone(),
+            _ => panic!("{name} is not a flag column"),
+        }
+    }
+
+    fn floats<'a>(columns: &'a VarColumns, name: &str) -> &'a [f64] {
+        match column(columns, name) {
+            Column::Float(values) => values,
+            _ => panic!("{name} is not a float column"),
+        }
+    }
+
+    fn texts<'a>(columns: &'a VarColumns, name: &str) -> &'a [Option<String>] {
+        match column(columns, name) {
+            Column::Text(values) => values,
+            _ => panic!("{name} is not a text column"),
+        }
+    }
+
+    fn missing(columns: &VarColumns, name: &str) -> usize {
+        match column(columns, name) {
+            Column::NullableInt(_) => ints(columns, name).iter().flatten().count(),
+            Column::NullableFlag(_) => flags(columns, name).iter().flatten().count(),
+            Column::Text(_) => texts(columns, name).iter().flatten().count(),
+            _ => panic!("{name} cannot be missing"),
+        }
+        .abs_diff(columns.names.len())
+    }
+
+    fn height(column: &Column) -> usize {
+        match column {
+            Column::Int(values) => values.len(),
+            Column::NullableInt(values) => values.len(),
+            Column::Float(values) => values.len(),
+            Column::Flag(values) => values.len(),
+            Column::NullableFlag(values) => values.len(),
+            Column::Text(values) => values.len(),
+        }
+    }
+
+    fn names(columns: &VarColumns) -> Vec<String> {
+        let names = columns.columns.iter().map(|(name, _)| name.clone());
+        names.collect()
+    }
+
+    fn nullable(columns: &VarColumns) -> Vec<&str> {
+        columns
+            .columns
             .iter()
-            .map(ToString::to_string)
+            .filter(|(_, column)| {
+                matches!(column, Column::NullableInt(_) | Column::NullableFlag(_))
+            })
+            .map(|(name, _)| name.as_str())
             .collect()
-    }
-
-    fn write(columns: VarColumns) -> anyhow::Result<()> {
-        let rows = columns.names.len();
-        let output = Output {
-            obs_names: vec!["c0".into()],
-            obs: DataFrame::empty(),
-            var_names: columns.names,
-            var: columns.frame,
-            nullable_var: columns.nullable,
-            x: CsrMatrix::try_from_csr_data(1, rows, vec![0, 0], vec![], Vec::<i8>::new()).unwrap(),
-            layers: vec![],
-            uns: vec![],
-        };
-        let dir = tempfile::tempdir()?;
-        write_h5ad(&dir.path().join("out.h5ad"), output)
     }
 
     #[test]
@@ -461,29 +511,28 @@ mod tests {
         table
             .push(row(200, "G"), values(false), tier, None)
             .unwrap();
-        let df = table.finish().unwrap().frame;
+        let df = table.finish();
 
-        assert_eq!(df.height(), 2);
+        assert_eq!(df.names.len(), 2);
         for name in ["chrom", "ref", "alt", "id", "filter", "SYMBOL", "pick_tier"] {
-            assert!(is_categorical(df.column(name).unwrap()), "{name}");
+            assert!(is_text(&df, name), "{name}");
         }
-        assert_eq!(df.column("pos").unwrap().dtype(), &DataType::Int64);
-        assert_eq!(df.column("alt_reads").unwrap().dtype(), &DataType::Int64);
-        assert_eq!(df.column("AC").unwrap().dtype(), &DataType::Int64);
-        assert_eq!(df.column("INDEL").unwrap().dtype(), &DataType::Boolean);
-        assert_eq!(df.column("is_lof").unwrap().dtype(), &DataType::Boolean);
+        assert!(matches!(column(&df, "start"), Column::Int(_)));
+        assert!(matches!(column(&df, "end"), Column::Int(_)));
+        assert!(matches!(column(&df, "alt_reads"), Column::Int(_)));
+        assert!(matches!(column(&df, "AC"), Column::NullableInt(_)));
+        assert!(matches!(column(&df, "INDEL"), Column::Flag(_)));
+        assert!(matches!(column(&df, "is_lof"), Column::NullableFlag(_)));
 
-        let qual = df.column("qual").unwrap().f64().unwrap();
-        assert_eq!(qual.get(0), Some(30.5));
-        assert!(qual.get(1).unwrap().is_nan());
+        let qual = floats(&df, "qual");
+        assert_eq!(qual[0], 30.5);
+        assert!(qual[1].is_nan());
 
-        let revel = df.column("REVEL_score").unwrap().f64().unwrap();
-        assert_eq!(revel.get(0), Some(0.5));
-        assert!(revel.get(1).unwrap().is_nan());
+        let revel = floats(&df, "REVEL_score");
+        assert_eq!(revel[0], 0.5);
+        assert!(revel[1].is_nan());
 
-        let symbol = df.column("SYMBOL").unwrap();
-        assert_eq!(symbol.null_count(), 1);
-        assert!(!matches!(symbol.get(0).unwrap(), AnyValue::Null));
+        assert_eq!(texts(&df, "SYMBOL"), [Some("TP53".to_string()), None]);
     }
 
     #[test]
@@ -497,7 +546,7 @@ mod tests {
         ];
         let csq = index(&["SYMBOL"]);
         let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), false);
-        let df = table.finish().unwrap().frame;
+        let df = table.finish();
         let names = names(&df);
         for expected in [
             "INFO_SYMBOL",
@@ -516,7 +565,7 @@ mod tests {
         let info = [spec("AF", Shape::RefAlt, Kind::Float)];
         let csq = index(&["AF_ref"]);
         let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), false);
-        let df = table.finish().unwrap().frame;
+        let df = table.finish();
         let names = names(&df);
         assert!(names.contains(&"INFO_AF_ref".to_string()));
         assert!(names.contains(&"AF_alt".to_string()));
@@ -550,58 +599,43 @@ mod tests {
                 )
                 .unwrap();
         }
-        let df = table.finish().unwrap().frame;
+        let df = table.finish();
 
-        let ints = |name: &str| -> Vec<Option<i64>> {
-            df.column(name).unwrap().i64().unwrap().iter().collect()
-        };
-        let bools = |name: &str| -> Vec<Option<bool>> {
-            df.column(name).unwrap().bool().unwrap().iter().collect()
-        };
-        let texts = |name: &str| -> Vec<Option<String>> {
-            let column = df.column(name).unwrap().cast(&DataType::String).unwrap();
-            column
-                .str()
-                .unwrap()
-                .iter()
-                .map(|v| v.map(str::to_string))
-                .collect()
-        };
         let ranks = ["missense_variant", "splice_donor_variant", "intron_variant"]
             .map(|term| Some(i64::from(rank(term).unwrap())));
-        assert_eq!(ints("consequence_rank"), ranks);
-        assert_eq!(bools("is_coding"), [Some(true), Some(false), Some(false)]);
-        assert_eq!(bools("is_lof"), [Some(false), Some(true), Some(false)]);
+        assert_eq!(ints(&df, "consequence_rank"), ranks);
         assert_eq!(
-            texts("pick_tier"),
+            flags(&df, "is_coding"),
+            [Some(true), Some(false), Some(false)]
+        );
+        assert_eq!(flags(&df, "is_lof"), [Some(false), Some(true), Some(false)]);
+        assert_eq!(
+            texts(&df, "pick_tier"),
             [
-                Some("mane_select".into()),
-                Some("other".into()),
-                Some("canonical".into())
+                Some("mane_select".to_string()),
+                Some("other".to_string()),
+                Some("canonical".to_string())
             ]
         );
         assert_eq!(
-            texts("worst_panel_impact"),
+            texts(&df, "worst_panel_impact"),
             [
-                Some("HIGH".into()),
-                Some("LOW".into()),
-                Some("MODIFIER".into())
+                Some("HIGH".to_string()),
+                Some("LOW".to_string()),
+                Some("MODIFIER".to_string())
             ]
         );
         assert_eq!(
-            texts("SYMBOL"),
-            [Some("TP53".into()), Some("NPM1".into()), Some("KIT".into())]
+            texts(&df, "SYMBOL"),
+            [
+                Some("TP53".to_string()),
+                Some("NPM1".to_string()),
+                Some("KIT".to_string())
+            ]
         );
-        let revel: Vec<Option<f64>> = df
-            .column("REVEL_score")
-            .unwrap()
-            .f64()
-            .unwrap()
-            .iter()
-            .collect();
-        assert_eq!(revel, [Some(0.9), Some(0.1), Some(0.5)]);
-        assert_eq!(ints("DP"), [Some(11), Some(22), Some(33)]);
-        assert_eq!(bools("INDEL"), [Some(true), Some(false), Some(true)]);
+        assert_eq!(floats(&df, "REVEL_score"), [0.9, 0.1, 0.5]);
+        assert_eq!(ints(&df, "DP"), [Some(11), Some(22), Some(33)]);
+        assert_eq!(flags(&df, "INDEL"), [Some(true), Some(false), Some(true)]);
     }
 
     #[test]
@@ -610,7 +644,7 @@ mod tests {
         let info = [spec("COSMIC", Shape::Scalar, Kind::Text)];
         let csq = index(&["SYMBOL", "COSMIC"]);
         let table = VarTable::new(&info, Some(&csq), &exclusions, false);
-        let df = table.finish().unwrap().frame;
+        let df = table.finish();
         let names = names(&df);
         assert!(names.contains(&"SYMBOL".to_string()));
         assert!(names.contains(&"COSMIC".to_string()));
@@ -623,11 +657,11 @@ mod tests {
         let info = [spec("pick_tier", Shape::Scalar, Kind::Text)];
         let table = VarTable::new(&info, None, &Exclusions::default(), false);
         assert_eq!(table.duplicate_column(), None);
-        let columns = table.finish().unwrap();
-        let names = names(&columns.frame);
+        let columns = table.finish();
+        assert_eq!(nullable(&columns).len(), 0);
+        let names = names(&columns);
         assert_eq!(names.len(), RECORD_NAMES.len() + 1);
         assert_eq!(names.last().unwrap(), "pick_tier");
-        assert_eq!(columns.nullable.len(), 0);
     }
 
     #[test]
@@ -641,7 +675,7 @@ mod tests {
         let csq = index(&["STRAND", "REVEL", "SYMBOL"]);
         let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), false);
         assert_eq!(
-            table.finish().unwrap().nullable,
+            nullable(&table.finish()),
             ["STRAND", "consequence_rank", "is_coding", "is_lof", "DP"]
         );
     }
@@ -653,9 +687,9 @@ mod tests {
         let plus = entry(&["plus"]);
         let tier = Some((&plus, Tier::Other));
         table.push(row(1, "T"), vec![], tier, None).unwrap();
-        let columns = table.finish().unwrap();
-        assert!(!columns.nullable.contains(&"STRAND".to_string()));
-        assert!(is_categorical(columns.frame.column("STRAND").unwrap()));
+        let columns = table.finish();
+        assert!(!nullable(&columns).contains(&"STRAND"));
+        assert!(is_text(&columns, "STRAND"));
     }
 
     #[test]
@@ -663,12 +697,13 @@ mod tests {
         let info = [spec("DP", Shape::Scalar, Kind::Integer)];
         let csq = index(&["SYMBOL"]);
         let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), true);
-        let df = table.finish().unwrap().frame;
+        let df = table.finish();
         assert_eq!(
             names(&df),
             [
                 "chrom",
-                "pos",
+                "start",
+                "end",
                 "ref",
                 "alt",
                 "id",
@@ -694,14 +729,13 @@ mod tests {
         let csq = index(&["Consequence", "SYMBOL"]);
         let mut table = VarTable::new(&[], Some(&csq), &Exclusions::default(), false);
         table.push(row(5, "T"), vec![], None, None).unwrap();
-        let df = table.finish().unwrap().frame;
-        assert_eq!(df.height(), 1);
+        let df = table.finish();
+        assert_eq!(df.names.len(), 1);
         for name in ["consequence_rank", "is_coding", "is_lof", "pick_tier"] {
-            assert_eq!(df.column(name).unwrap().null_count(), 1, "{name}");
+            assert_eq!(missing(&df, name), 1, "{name}");
         }
-        let symbol = df.column("SYMBOL").unwrap();
-        assert!(is_categorical(symbol));
-        assert_eq!(symbol.null_count(), 1);
+        assert!(is_text(&df, "SYMBOL"));
+        assert_eq!(missing(&df, "SYMBOL"), 1);
     }
 
     #[test]
@@ -740,10 +774,9 @@ mod tests {
                 Some("HIGH"),
             )
             .unwrap();
-        let VarColumns { names, frame, .. } = table.finish().unwrap();
-        assert_eq!(names.len(), 2);
-        assert_eq!(frame.height(), 2);
-        assert!(frame.columns().iter().all(|c| c.len() == 2));
+        let columns = table.finish();
+        assert_eq!(columns.names.len(), 2);
+        assert!(columns.columns.iter().all(|(_, c)| height(c) == 2));
     }
 
     #[test]
@@ -769,13 +802,11 @@ mod tests {
             InfoValue::Float(Some(0.9)),
         ];
         table.push(row(1, "T"), values, None, None).unwrap();
-        let df = table.finish().unwrap().frame;
-        let int = |name: &str| df.column(name).unwrap().i64().unwrap().get(0);
-        let float = |name: &str| df.column(name).unwrap().f64().unwrap().get(0);
-        assert_eq!(int("DP4_1"), Some(7));
-        assert_eq!(int("DP4_2"), Some(8));
-        assert_eq!(float("AF_ref"), Some(0.1));
-        assert_eq!(float("AF_alt"), Some(0.9));
+        let df = table.finish();
+        assert_eq!(ints(&df, "DP4_1"), [Some(7)]);
+        assert_eq!(ints(&df, "DP4_2"), [Some(8)]);
+        assert_eq!(floats(&df, "AF_ref"), [0.1]);
+        assert_eq!(floats(&df, "AF_alt"), [0.9]);
     }
 
     #[test]
@@ -783,7 +814,7 @@ mod tests {
         let mut table = VarTable::new(&[], None, &Exclusions::default(), false);
         table.push(row(100, "T"), vec![], None, None).unwrap();
         table.push(row(50, "G"), vec![], None, None).unwrap();
-        let names = table.finish().unwrap().names;
+        let names = table.finish().names;
         assert_eq!(
             names,
             [
@@ -798,16 +829,15 @@ mod tests {
         let info = [spec("DP", Shape::Scalar, Kind::Integer)];
         let csq = index(&["SYMBOL"]);
         let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), true);
-        let columns = table.finish().unwrap();
+        let columns = table.finish();
         assert_eq!(columns.names.len(), 0);
-        assert_eq!(columns.frame.height(), 0);
-        assert_eq!(columns.frame.width(), 11 + 1 + 5 + 1);
-        assert!(is_categorical(columns.frame.column("SYMBOL").unwrap()));
-        write(columns).unwrap();
+        assert_eq!(columns.columns.len(), 12 + 1 + 5 + 1);
+        assert!(columns.columns.iter().all(|(_, c)| height(c) == 0));
+        assert!(is_text(&columns, "SYMBOL"));
     }
 
     #[test]
-    fn all_missing_text_columns_write() {
+    fn all_missing_text_columns_finish() {
         let info = [spec("NOTE", Shape::Scalar, Kind::Text)];
         let csq = index(&["Consequence", "SYMBOL"]);
         let mut table = VarTable::new(&info, Some(&csq), &Exclusions::default(), true);
@@ -817,7 +847,7 @@ mod tests {
         table
             .push(row(2, "G"), vec![InfoValue::Text(None)], None, None)
             .unwrap();
-        let columns = table.finish().unwrap();
+        let columns = table.finish();
         for name in [
             "id",
             "filter",
@@ -826,19 +856,7 @@ mod tests {
             "NOTE",
             "SYMBOL",
         ] {
-            assert_eq!(
-                columns.frame.column(name).unwrap().null_count(),
-                2,
-                "{name}"
-            );
+            assert_eq!(missing(&columns, name), 2, "{name}");
         }
-        write(columns).unwrap();
-    }
-
-    #[test]
-    fn no_csq_rows_write() {
-        let mut table = VarTable::new(&[], None, &Exclusions::default(), false);
-        table.push(row(1, "T"), vec![], None, None).unwrap();
-        write(table.finish().unwrap()).unwrap();
     }
 }
