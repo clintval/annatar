@@ -26,23 +26,25 @@ type Sparse<'py> = (Bound<'py, PyAny>, Bound<'py, PyAny>, Bound<'py, PyAny>);
 type NamedColumn<'py> = (String, &'static str, Bound<'py, PyAny>, Bound<'py, PyAny>);
 
 thread_local! {
-    static WARNINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static MESSAGES: RefCell<Vec<(Level, String)>> = const { RefCell::new(Vec::new()) };
 }
 
 const LOGGER_TAKEN: &CStr = c"another Rust logger is installed, so annatar warnings are lost";
 
-struct WarningLog;
+struct MessageLog;
 
-static WARNING_LOG: WarningLog = WarningLog;
+static MESSAGE_LOG: MessageLog = MessageLog;
 
-impl Log for WarningLog {
+impl Log for MessageLog {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Warn && metadata.target().starts_with("annatar")
+        metadata.level() <= Level::Info && metadata.target().starts_with("annatar")
     }
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            WARNINGS.with_borrow_mut(|warnings| warnings.push(record.args().to_string()));
+            MESSAGES.with_borrow_mut(|messages| {
+                messages.push((record.level(), record.args().to_string()));
+            });
         }
     }
 
@@ -53,9 +55,9 @@ impl Log for WarningLog {
 fn install_logger() -> bool {
     static INSTALLED: OnceLock<bool> = OnceLock::new();
     *INSTALLED.get_or_init(|| {
-        let installed = log::set_logger(&WARNING_LOG).is_ok();
+        let installed = log::set_logger(&MESSAGE_LOG).is_ok();
         if installed {
-            log::set_max_level(LevelFilter::Warn);
+            log::set_max_level(LevelFilter::Info);
         }
         installed
     })
@@ -77,10 +79,17 @@ fn to_python(error: &anyhow::Error) -> PyErr {
 }
 
 // Stack level 2 is the caller of the Python function that wraps this module.
-fn raise_warnings(py: Python<'_>) -> PyResult<()> {
+fn emit_messages(py: Python<'_>) -> PyResult<()> {
     let category = py.get_type::<PyUserWarning>();
-    for message in WARNINGS.take() {
-        PyErr::warn(py, &category, &CString::new(message)?, 2)?;
+    let logger = py
+        .import("logging")?
+        .call_method1("getLogger", ("annatar",))?;
+    for (level, message) in MESSAGES.take() {
+        if level <= Level::Warn {
+            PyErr::warn(py, &category, &CString::new(message)?, 2)?;
+        } else {
+            logger.call_method1("info", (message,))?;
+        }
     }
     Ok(())
 }
@@ -243,9 +252,9 @@ fn read_vcf(
         threads,
         command_line,
     };
-    WARNINGS.take();
+    MESSAGES.take();
     let output = py.detach(|| convert(&config));
-    raise_warnings(py)?;
+    emit_messages(py)?;
     Conversion::new(py, output.map_err(|error| to_python(&error))?)
 }
 

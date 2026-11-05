@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 import sys
@@ -94,6 +95,19 @@ def test_warnings_match_the_cli_log(path, run_cli):
             assert run.returncode == 1
     assert [str(warning.message) for warning in caught] == logged(run, "WARN")
     assert all(warning.category is UserWarning for warning in caught)
+
+
+def test_a_vcf_with_no_csq_logs_an_info_line(caplog):
+    with caplog.at_level(logging.INFO, logger="annatar"), warnings.catch_warnings():
+        warnings.simplefilter("error")
+        annatar.read_vcf(DATA / "no-csq.vcf")
+    assert caplog.messages == ["no INFO/CSQ to read, so the variants have no annotation"]
+
+
+def test_an_annotated_vcf_logs_nothing(caplog):
+    with caplog.at_level(logging.INFO, logger="annatar"):
+        annatar.read_vcf(DATA / "basic.vcf")
+    assert caplog.messages == []
 
 
 def test_a_warning_points_at_the_caller():
