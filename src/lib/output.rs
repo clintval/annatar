@@ -1,7 +1,7 @@
 use nalgebra_sparse::CsrMatrix;
 
-pub const X_ENCODING: &str =
-    "number of copies of this ALT in the called genotype; hom-ref and uncalled are not stored";
+pub const X_ENCODING: &str = "number of copies of this ALT in the called genotype, capped at \
+    this ALT's read count; hom-ref and uncalled are not stored";
 
 pub enum LayerMatrix {
     I32(CsrMatrix<i32>),

@@ -123,10 +123,10 @@ def test_positions_sort_as_numbers(tmp_path):
     ]
 
 
-def test_ref_then_alt_break_ties(tmp_path):
+def test_end_then_ref_then_alt_break_ties(tmp_path):
     first = library(tmp_path, "a", ["chr1"], "chr1:5:C:T", "chr1:5:AT:A")
     second = library(tmp_path, "b", ["chr1"], "chr1:5:C:A")
-    assert merged_names(tmp_path, first, second) == ["chr1:5:AT:A", "chr1:5:C:A", "chr1:5:C:T"]
+    assert merged_names(tmp_path, first, second) == ["chr1:5:C:A", "chr1:5:C:T", "chr1:5:AT:A"]
 
 
 def test_later_libraries_append_their_contigs(tmp_path):
@@ -253,6 +253,12 @@ def test_the_result_reads_in_h5py_and_anndata(tmp_path):
         (lambda adata: setattr(adata, "X", adata.X.toarray()), "no sparse integer X"),
         (lambda adata: adata.var.pop("ref_reads"), "no var column ref_reads"),
         (lambda adata: adata.var.pop("chrom"), "no var column chrom"),
+        (
+            lambda adata: setattr(
+                adata, "var", adata.var.assign(start=adata.var["start"].astype(float))
+            ),
+            "no integer var column start",
+        ),
     ],
 )
 def test_an_h5ad_annatar_did_not_write_stops_with_a_clear_error(change, message, tmp_path):

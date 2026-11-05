@@ -8,9 +8,11 @@ import time
 
 import anndata as ad
 import h5py
+import numpy as np
 import pytest
 from conftest import BINARY
 from conftest import DATA
+from conftest import read_quietly
 
 from annatar import _cli
 
@@ -252,7 +254,7 @@ NORM = "the header shows bcftools norm splitting multiallelics after VEP; annota
         ("layer-collides-number-r.vcf", "", "FORMAT/X and FORMAT/X_ref both make the layer X_ref"),
         ("layer-collides-fixed.vcf", "", "FORMAT/X and FORMAT/X_1 both make the layer X_1"),
         ("var-column-collides-info.vcf", "", "two fields make the var column X_ref"),
-        ("var-column-collides-csq.vcf", "", "two fields make the var column pos"),
+        ("var-column-collides-csq.vcf", "", "two fields make the var column start"),
         ("csq-no-format.vcf", "", 'INFO/CSQ has no "Format: " list in its Description'),
         (
             "gt-allele-range.vcf",
@@ -316,6 +318,35 @@ def test_an_exclusion_that_cannot_be_honored_is_an_error(name, field, message, t
     run = failed("--exclude-field", field, DATA / name, tmp_path / "out.h5ad")
     assert message in run.stderr
     assert list(tmp_path.iterdir()) == []
+
+
+def from_the_library(_):
+    return read_quietly(DATA / "coordinates.vcf")
+
+
+def from_the_command(tmp_path):
+    succeeded(DATA / "coordinates.vcf", tmp_path / "out.h5ad")
+    return ad.read_h5ad(tmp_path / "out.h5ad")
+
+
+@pytest.mark.parametrize("load", [from_the_library, from_the_command])
+def test_coordinates_are_zero_based_and_half_open(load, tmp_path):
+    var = load(tmp_path).var
+    spans = dict(zip(var.index, zip(var["start"], var["end"], strict=True), strict=True))
+    assert spans == {
+        "chr1:100:A:G": (99, 100),
+        "chr1:200:TTC:T": (199, 202),
+        "chr1:300:A:ACGT": (299, 300),
+        "chr1:400:A:<DEL>": (399, 500),
+        "chr1:600:C:<DEL>": (599, 600),
+        "chr1:700:G:G]chr2:50]": (699, 700),
+        "chr1:800:TA:T": (799, 801),
+        "chr1:800:TA:<DEL>": (799, 950),
+    }
+    assert var["start"].dtype == var["end"].dtype == np.int64
+    assert list(var.columns[:3]) == ["chrom", "start", "end"]
+    assert "pos" not in var
+    assert var["END"].notna().sum() == 3
 
 
 def test_a_header_with_no_csq_gets_one_info_line_and_no_warning(tmp_path):
@@ -424,6 +455,31 @@ def test_output_names_differing_by_suffix_do_not_share_a_partial_file(tmp_path):
     output = tmp_path / "cells.1"
     succeeded(DATA / "basic.vcf", output)
     assert ad.read_h5ad(output).n_vars == 5
+
+
+@pytest.mark.parametrize("spelling", ["same.vcf", "./same.vcf", "link.vcf"])
+def test_an_output_that_is_the_input_is_refused_and_left_alone(spelling, tmp_path):
+    source = tmp_path / "same.vcf"
+    source.write_bytes((DATA / "basic.vcf").read_bytes())
+    (tmp_path / "link.vcf").symlink_to(source)
+    run = failed("same.vcf", spelling, cwd=tmp_path)
+    assert run.returncode == 1
+    assert "is also an input" in run.stderr
+    assert source.read_bytes() == (DATA / "basic.vcf").read_bytes()
+
+
+def test_a_partial_file_that_is_the_input_is_refused(tmp_path):
+    source = tmp_path / "out.h5ad.partial"
+    source.write_bytes((DATA / "basic.vcf").read_bytes())
+    run = failed(source, tmp_path / "out.h5ad")
+    assert "is also an input" in run.stderr
+    assert source.read_bytes() == (DATA / "basic.vcf").read_bytes()
+
+
+def test_standard_input_may_replace_a_file_named_like_it(tmp_path):
+    (tmp_path / "-").write_text("earlier")
+    succeeded("-", "./-", cwd=tmp_path, stdin=(DATA / "basic.vcf").read_bytes())
+    assert ad.read_h5ad(tmp_path / "-").n_vars == 5
 
 
 def test_standard_output_is_refused(tmp_path):
@@ -553,6 +609,7 @@ def test_forcing_color_in_the_environment_does_not_color_a_pipe():
 
 def test_the_help_lists_every_flag():
     help_text = succeeded("--help").stdout
+    flowed = " ".join(help_text.split())
     for expected in (
         "<VCF>",
         "<H5AD>",
@@ -563,7 +620,7 @@ def test_the_help_lists_every_flag():
         "MIT License",
         "number of copies of this ALT in the called genotype",
     ):
-        assert expected in help_text
+        assert expected in flowed
     for unexpected in (
         "-o, --output",
         "\n      --output",

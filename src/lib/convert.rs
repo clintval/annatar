@@ -15,11 +15,11 @@ use noodles::vcf::variant::record_buf::samples::sample::Value as SampleValue;
 use noodles::vcf::variant::record_buf::samples::sample::value::Array as SampleArray;
 use noodles::vcf::variant::record_buf::samples::sample::value::genotype::Allele;
 
-use crate::alleles::{is_skipped_alt, vep_alleles};
+use crate::alleles::{is_skipped_alt, is_structural, vep_alleles};
 use crate::consequence::{VEP_RELEASE, rank, vep_major};
 use crate::csq::{CsqEntry, CsqIndex, parse_entries};
 use crate::fields::{Exclusions, FieldPlan, FieldSpec, Kind, Section, Shape, plan_fields};
-use crate::genotype::copies_of_alt;
+use crate::genotype::{capped_copies, copies_of_alt};
 use crate::input::{VariantSource, open_variants};
 use crate::matrix::{Cell, SparseBuilder};
 use crate::output::{Column, Output, UnsValue, X_ENCODING};
@@ -649,6 +649,16 @@ struct Conversion<'a> {
     unranked_terms: HashSet<String>,
 }
 
+// A 1-based inclusive INFO/END is the same number as a half-open end.
+fn span_end(record: &RecordBuf, pos: usize, alt: &str) -> anyhow::Result<i64> {
+    if is_structural(alt)
+        && let Some(Some(InfoField::Integer(end))) = record.info().get("END")
+    {
+        return Ok(i64::from(*end));
+    }
+    Ok(i64::try_from(pos + record.reference_bases().len())? - 1)
+}
+
 fn svtype(record: &RecordBuf) -> Option<&str> {
     match record.info().get("SVTYPE").flatten() {
         Some(InfoField::String(svtype)) => Some(svtype),
@@ -706,6 +716,7 @@ impl<'a> Conversion<'a> {
             self.records_without_alt += 1;
         }
 
+        let pos = record.variant_start().map_or(0, usize::from);
         for (position, (alt, spelling)) in alts.iter().zip(&vep).enumerate() {
             if is_skipped_alt(alt) {
                 self.skipped_alts += 1;
@@ -726,7 +737,8 @@ impl<'a> Conversion<'a> {
             let totals = self.push_column(&samples, position);
             let row = RecordRow {
                 chrom: record.reference_sequence_name().to_string(),
-                pos: record.variant_start().map_or(0, usize::from),
+                pos,
+                end: span_end(record, pos, alt)?,
                 reference: record.reference_bases().to_string(),
                 alt: alt.clone(),
                 id: joined(record.ids().as_ref()),
@@ -779,9 +791,10 @@ impl<'a> Conversion<'a> {
 
         for (row, sample) in (0u32..).zip(0..n_obs) {
             samples.fill_alleles(sample, &mut alleles);
-            self.matrix
-                .push_copies(row, copies_of_alt(&alleles, allele));
             let depths = samples.allelic_depths(sample);
+            let reads = depths.get(allele).copied().flatten();
+            let copies = capped_copies(copies_of_alt(&alleles, allele), reads);
+            self.matrix.push_copies(row, copies);
             let has_reads = depths.iter().flatten().any(|reads| *reads > 0);
             for (slot, &(layer, position, kind)) in slots.iter().enumerate() {
                 let cell = samples.cell(layer, sample, position, kind);

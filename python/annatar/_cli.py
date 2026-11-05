@@ -49,7 +49,7 @@ def main() -> None:
     """Run the `annatar` command."""
     warnings.simplefilter("ignore")
     try:
-        code = _native.main(sys.argv, _write_conversion, _merge)
+        code = _native.main(sys.argv, _refuse_an_input, _write_conversion, _merge)
     except KeyboardInterrupt:
         code = 130
     sys.exit(code)

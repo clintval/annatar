@@ -20,6 +20,7 @@ env:
 
 jobs:
   checks:
+    name: checks (${{ matrix.os }})
     # Branches of this repository are tested when pushed, so only pull requests from forks run here.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:

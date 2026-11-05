@@ -54,6 +54,7 @@ include       = [
 ]
 exclude       = [
     { path = "tests/**/__pycache__/**/*", format = "sdist" },
+    { path = "tests/python/out/**/*", format = "sdist" },
 ]
 
 [tool.ruff]

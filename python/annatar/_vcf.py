@@ -72,7 +72,7 @@ def read_vcf(
 
     Args:
         path: The VCF or BCF, plain or bgzipped.
-        genes: Panel genes preferred by the pick, one HGNC symbol or Ensembl gene ID per line.
+        genes: Prioritize effects in this gene set, one HGNC symbol or Ensembl gene ID per line.
         mane_table: NCBI MANE summary, plain or gzipped, used when CSQ has no MANE subfields.
         exclude_fields: Fields to leave out, named `INFO/ID`, `FORMAT/ID` or `INFO/CSQ/subfield`.
         threads: BGZF decompression threads.
@@ -84,6 +84,8 @@ def read_vcf(
         ValueError: If the file is malformed or an option is invalid.
         OSError: If a file cannot be read.
     """
+    if not 1 <= threads < 2**63:
+        raise ValueError(f"threads must be a positive integer, not {threads}")
     conversion = _native.read_vcf(
         path,
         genes=genes,

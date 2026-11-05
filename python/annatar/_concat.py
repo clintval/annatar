@@ -17,7 +17,7 @@ from annatar._vcf import _text_index
 
 _NULLABLE = {"bool": "boolean", "int64": "Int64"}
 _RECOUNTED = ("n_cells_covered", "n_cells_alt", "ref_reads", "alt_reads")
-_IDENTITY = ("chrom", "pos", "ref", "alt")
+_IDENTITY = ("chrom", "start", "end", "ref", "alt")
 _TEXT_IDENTITY = {"chrom": object, "ref": object, "alt": object}
 
 
@@ -49,6 +49,10 @@ def _is_sparse_integer(matrix: Any) -> bool:
     return issparse(matrix) and np.issubdtype(matrix.dtype, np.integer)
 
 
+def _is_whole(column: pd.Series) -> bool:
+    return pd.api.types.is_integer_dtype(column) and not column.hasnans
+
+
 def _load(name: str, item: StrPath | AnnData) -> AnnData:
     library = item if isinstance(item, AnnData) else _read(item)
     layers: Any = library.layers
@@ -58,6 +62,8 @@ def _load(name: str, item: StrPath | AnnData) -> AnnData:
     ]
     columns = (*_IDENTITY, *_RECOUNTED)
     missing += [f"var column {name}" for name in columns if name not in library.var]
+    spans = [name for name in ("start", "end") if name in library.var]
+    missing += [f"integer var column {n}" for n in spans if not _is_whole(library.var[n])]
     if missing:
         source = name if isinstance(item, AnnData) else item
         raise ValueError(f"{source} is not annatar's h5ad: it has no {', '.join(missing)}")
@@ -79,7 +85,8 @@ def _variant_order(libraries: list[Any], ranks: dict[str, int]) -> pd.Index:
     keys = keys[~keys.index.duplicated()]
     order = _native.variant_order(
         keys["chrom"].map(ranks).tolist(),
-        keys["pos"].tolist(),
+        keys["start"].tolist(),
+        keys["end"].tolist(),
         keys["ref"].tolist(),
         keys["alt"].tolist(),
     )
@@ -151,8 +158,8 @@ def concat(items: Mapping[str, StrPath | AnnData] | Iterable[StrPath | AnnData])
     Cells keep their barcodes with the library name appended and name their library in
     `obs["library"]`, so merging a merged file appends a library name again. An `obs` column some
     libraries lack is missing for their cells. Variants are the union of the libraries, sorted by
-    contig in the order of `uns["contigs"]`, then `pos`, `ref` and `alt`. A contig on no list goes
-    after the listed ones. The columns `n_cells_covered`, `n_cells_alt`, `ref_reads` and
+    contig in the order of `uns["contigs"]`, then `start`, `end`, `ref` and `alt`. A contig on no
+    list goes after the listed ones. The columns `n_cells_covered`, `n_cells_alt`, `ref_reads` and
     `alt_reads` are recounted from the merged layers. Every other `var` value on a shared variant,
     such as `qual` or an INFO field, comes from the first library holding it, and later libraries
     fill only the columns that library lacks entirely.

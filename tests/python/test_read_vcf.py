@@ -79,9 +79,10 @@ def test_a_lone_string_of_fields_raises():
         annatar.read_vcf(DATA / "basic.vcf", exclude_fields="INFO/CSQ")
 
 
-def test_zero_threads_raises():
-    with pytest.raises(ValueError):
-        annatar.read_vcf(DATA / "basic.vcf", threads=0)
+@pytest.mark.parametrize("threads", [0, -1, 2**70])
+def test_threads_out_of_range_raises(threads):
+    with pytest.raises(ValueError, match="threads must be"):
+        annatar.read_vcf(DATA / "basic.vcf", threads=threads)
 
 
 @pytest.mark.parametrize("path", FIXTURES + REFUSED, ids=lambda path: path.name)
@@ -158,6 +159,57 @@ def test_sparse_arrays_arrive_without_a_copy():
     for matrix in (adata.X, *adata.layers.values()):
         for array in (matrix.data, matrix.indices, matrix.indptr):
             assert not memory_owner(array).flags.owndata
+
+
+def test_x_is_capped_at_this_alts_read_count():
+    adata = read_quietly(DATA / "capped-copies.vcf")
+    x = np.asarray(adata.X.todense())
+    assert x[:, adata.var_names.get_loc("chr1:100:A:G")].tolist() == [1, 2, 2, 2, 0, 1, 0, 0]
+    assert x[:, adata.var_names.get_loc("chr1:200:A:G")].tolist() == [1, 0, 0, 1, 0, 2, 0, 0]
+    assert x[:, adata.var_names.get_loc("chr1:200:A:T")].tolist() == [0, 1, 1, 1, 0, 0, 0, 0]
+
+
+def test_a_cap_leaves_the_reads_in_the_layers():
+    adata = read_quietly(DATA / "capped-copies.vcf")
+    alt = np.asarray(adata.layers["AD_alt"].todense())
+    assert alt[:, adata.var_names.get_loc("chr1:100:A:G")].tolist() == [1, 2, 5, 2, 0, 0, 2, 1]
+    assert adata.X.data.min() > 0
+
+
+def cells_with_no_alt_count(path):
+    missing = set()
+    for line in path.read_text().splitlines():
+        if line.startswith("#CHROM"):
+            cells = line.split("\t")[9:]
+        elif not line.startswith("#"):
+            chrom, pos, _, ref, alts, _, _, _, keys, *samples = line.split("\t")
+            if "AD" not in keys.split(":"):
+                continue
+            at = keys.split(":").index("AD")
+            for cell, sample in zip(cells, samples, strict=True):
+                fields = sample.split(":")
+                depths = fields[at].split(",") if at < len(fields) else ["."]
+                for number, alt in enumerate(alts.split(","), start=1):
+                    if number >= len(depths) or depths[number] == ".":
+                        missing.add((cell, f"{chrom}:{pos}:{ref}:{alt}"))
+    return missing
+
+
+@pytest.mark.parametrize(
+    "path",
+    [p for p in FIXTURES if p.suffix == ".vcf" and p.name != "sites-only.vcf"],
+    ids=lambda p: p.name,
+)
+def test_x_never_exceeds_an_alt_count(path):
+    adata = read_quietly(path)
+    counted = np.ones(adata.shape, dtype=bool)
+    for cell, variant in cells_with_no_alt_count(path):
+        if variant in adata.var_names:
+            counted[adata.obs_names.get_loc(cell), adata.var_names.get_loc(variant)] = False
+    x = np.asarray(adata.X.todense())
+    alt = np.asarray(adata.layers["AD_alt"].todense())
+    assert (x[counted] <= alt[counted]).all()
+    assert x[counted].sum() <= alt[counted].sum()
 
 
 def test_contigs_come_from_the_header_in_its_order(tmp_path):

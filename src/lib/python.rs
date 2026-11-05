@@ -244,11 +244,12 @@ impl<'py> Conversion<'py> {
 fn order_variants(
     py: Python<'_>,
     ranks: Vec<i64>,
-    positions: Vec<i64>,
+    starts: Vec<i64>,
+    ends: Vec<i64>,
     references: Vec<String>,
     alternates: Vec<String>,
 ) -> PyResult<Bound<'_, PyArray1<usize>>> {
-    let order = py.detach(|| variant_order(&ranks, &positions, &references, &alternates));
+    let order = py.detach(|| variant_order(&ranks, &starts, &ends, &references, &alternates));
     let order = order.map_err(|error| PyOSError::new_err(error.to_string()))?;
     Ok(order.into_pyarray(py))
 }
@@ -283,6 +284,15 @@ fn read_vcf(
     Conversion::new(py, output.map_err(|error| to_python(&error))?)
 }
 
+fn failed(py: Python<'_>, failure: PyErr) -> PyResult<i32> {
+    if failure.is_instance_of::<PyValueError>(py) || failure.is_instance_of::<PyOSError>(py) {
+        error!(target: "annatar", "{}", failure.value(py));
+        Ok(1)
+    } else {
+        Err(failure)
+    }
+}
+
 fn finish(py: Python<'_>, outcome: PyResult<Bound<'_, PyAny>>, output: &Path) -> PyResult<i32> {
     match outcome {
         Ok(counts) => {
@@ -291,14 +301,7 @@ fn finish(py: Python<'_>, outcome: PyResult<Bound<'_, PyAny>>, output: &Path) ->
             info!(target: "annatar", "wrote {cells} cells and {variants} variants to {output}");
             Ok(0)
         }
-        Err(failure)
-            if failure.is_instance_of::<PyValueError>(py)
-                || failure.is_instance_of::<PyOSError>(py) =>
-        {
-            error!(target: "annatar", "{}", failure.value(py));
-            Ok(1)
-        }
-        Err(failure) => Err(failure),
+        Err(failure) => failed(py, failure),
     }
 }
 
@@ -315,6 +318,7 @@ fn interruptible(py: Python<'_>, config: &Config) -> PyResult<anyhow::Result<Out
 fn dispatch(
     py: Python<'_>,
     args: &[OsString],
+    refuse_an_input: &Bound<'_, PyAny>,
     write_conversion: &Bound<'_, PyAny>,
     merge: &Bound<'_, PyAny>,
 ) -> PyResult<i32> {
@@ -326,16 +330,23 @@ fn dispatch(
     let _ = STDERR_LOG.set(logger);
     match invocation {
         Invocation::Merge { inputs, output } => finish(py, merge.call1((inputs, &output)), &output),
-        Invocation::Convert { config, output } => match interruptible(py, &config)? {
-            Ok(result) => {
-                let conversion = Conversion::new(py, result)?;
-                finish(py, write_conversion.call1((conversion, &output)), &output)
+        Invocation::Convert { config, output } => {
+            if config.input != Path::new("-")
+                && let Err(failure) = refuse_an_input.call1((vec![&config.input], &output))
+            {
+                return failed(py, failure);
             }
-            Err(failure) => {
-                error!(target: "annatar", "{failure:#}");
-                Ok(1)
+            match interruptible(py, &config)? {
+                Ok(result) => {
+                    let conversion = Conversion::new(py, result)?;
+                    finish(py, write_conversion.call1((conversion, &output)), &output)
+                }
+                Err(failure) => {
+                    error!(target: "annatar", "{failure:#}");
+                    Ok(1)
+                }
             }
-        },
+        }
     }
 }
 
@@ -345,11 +356,12 @@ fn dispatch(
 fn run_command(
     py: Python<'_>,
     args: Vec<OsString>,
+    refuse_an_input: &Bound<'_, PyAny>,
     write_conversion: &Bound<'_, PyAny>,
     merge: &Bound<'_, PyAny>,
 ) -> PyResult<i32> {
     catch_unwind(AssertUnwindSafe(|| {
-        dispatch(py, &args, write_conversion, merge)
+        dispatch(py, &args, refuse_an_input, write_conversion, merge)
     }))
     .unwrap_or(Ok(101))
 }

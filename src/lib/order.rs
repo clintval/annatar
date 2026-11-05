@@ -1,19 +1,22 @@
 use spillsort::{Config, Sorter, key};
 
-/// The positions of variants in order of contig rank, position, REF and ALT.
+/// The positions of variants in order of contig rank, start, end, REF and ALT.
 pub fn variant_order(
     ranks: &[i64],
-    positions: &[i64],
+    starts: &[i64],
+    ends: &[i64],
     references: &[String],
     alternates: &[String],
 ) -> Result<Vec<usize>, spillsort::Error> {
     let mut sorter = Sorter::new(Config::default())?;
     let mut sort_key = Vec::new();
-    let variants = ranks.iter().zip(positions).zip(references).zip(alternates);
-    for (row, (((rank, position), reference), alternate)) in variants.enumerate() {
+    let spans = ranks.iter().zip(starts).zip(ends);
+    let variants = spans.zip(references).zip(alternates);
+    for (row, ((((rank, start), end), reference), alternate)) in variants.enumerate() {
         sort_key.clear();
         key::push_int(&mut sort_key, *rank);
-        key::push_int(&mut sort_key, *position);
+        key::push_int(&mut sort_key, *start);
+        key::push_int(&mut sort_key, *end);
         key::push_str(&mut sort_key, reference);
         key::push_str(&mut sort_key, alternate);
         sorter.push(&sort_key, &row.to_le_bytes())?;
@@ -36,22 +39,24 @@ mod tests {
     }
 
     #[test]
-    fn rank_comes_before_position_then_ref_then_alt() {
+    fn rank_comes_before_start_then_end_then_ref_then_alt() {
         let order = variant_order(
             &[1, 0, 1, 1, 1],
             &[5, 100, 5, 5, 20],
+            &[6, 101, 7, 6, 21],
             &text(&["C", "A", "AT", "C", "A"]),
             &text(&["T", "G", "A", "A", "G"]),
         )
         .unwrap();
-        assert_eq!(order, [1, 2, 3, 0, 4]);
+        assert_eq!(order, [1, 3, 0, 2, 4]);
     }
 
     #[test]
-    fn positions_compare_as_numbers() {
+    fn coordinates_compare_as_numbers() {
         let order = variant_order(
             &[0, 0, 0],
             &[1000, 20, 100],
+            &[1001, 21, 101],
             &text(&["A", "A", "A"]),
             &text(&["G", "G", "G"]),
         )
@@ -62,7 +67,7 @@ mod tests {
     #[test]
     fn nothing_sorts_to_nothing() {
         assert_eq!(
-            variant_order(&[], &[], &[], &[]).unwrap(),
+            variant_order(&[], &[], &[], &[], &[]).unwrap(),
             Vec::<usize>::new()
         );
     }

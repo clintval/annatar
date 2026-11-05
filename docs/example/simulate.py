@@ -1,6 +1,7 @@
+# Requires scanpy and scikit-learn, which the pixi environment does not provide.
 """Simulate the paired VCF and chromatin h5ad of the README's MuData example.
 
-Every barcode, read and tile is invented. Run with `pixi run python docs/example/simulate.py`.
+Every barcode, read and tile is invented. Run from the repository root.
 """
 
 import subprocess

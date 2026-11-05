@@ -36,13 +36,13 @@ const CARGO_STYLING: Styles = Styles::styled()
 /// Convert a multi-sample VCF of single cells into an h5ad.
 ///
 /// Each VCF sample becomes a cell in `obs` and each ALT allele a variant in
-/// `var`. The `X` matrix holds the
-/// number of copies of this ALT in the called genotype; hom-ref and uncalled
-/// are not stored. Numeric FORMAT fields become sparse
-/// layers of plain counts, with zeros and missing values not stored.
-/// VEP annotation is optional: with `INFO/CSQ`, one consequence is picked per
-/// ALT and becomes typed `var` columns. The file is written once the whole VCF
-/// has been read, so a failed run leaves no output.
+/// `var`. The `X` matrix holds the number of copies of this ALT in the called
+/// genotype, capped at this ALT's read count; hom-ref and uncalled are not
+/// stored. Numeric FORMAT fields become sparse layers of plain counts, with
+/// zeros and missing values not stored. VEP annotation is optional: with
+/// `INFO/CSQ`, one consequence is picked per ALT and becomes typed `var`
+/// columns. The file is written once the whole VCF has been read, so a failed
+/// run leaves no output.
 ///
 /// EXAMPLES
 ///
@@ -79,11 +79,11 @@ enum Command {
 ///
 /// Each input is one library, named after its file. Barcodes gain the library
 /// name, `obs["library"]` names the library, and variants are the union, sorted
-/// by VCF header contig order, `pos`, `ref` and `alt`. A shared variant takes its
-/// whole `var` row from the first library holding it, and `n_cells_covered`,
-/// `n_cells_alt`, `ref_reads` and `alt_reads` are recounted from the merged
-/// layers. The file is written once every input has been read, so a failed run
-/// leaves no output.
+/// by VCF header contig order, `start`, `end`, `ref` and `alt`. A shared variant
+/// takes its whole `var` row from the first library holding it, and
+/// `n_cells_covered`, `n_cells_alt`, `ref_reads` and `alt_reads` are recounted
+/// from the merged layers. The file is written once every input has been read,
+/// so a failed run leaves no output.
 ///
 /// EXAMPLES
 ///
@@ -127,7 +127,7 @@ struct ConvertArgs {
     )]
     output: Option<PathBuf>,
 
-    /// Panel genes preferred by the pick, one HGNC symbol or Ensembl gene ID per
+    /// Prioritize effects in this gene set, one HGNC symbol or Ensembl gene ID per
     /// line.
     #[arg(long, value_name = "FILE", verbatim_doc_comment)]
     genes: Option<PathBuf>,

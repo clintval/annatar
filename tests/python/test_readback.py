@@ -14,7 +14,10 @@ import scipy.sparse as sp
 from conftest import BINARY
 from conftest import DATA
 
-X_ENCODING = "number of copies of this ALT in the called genotype; hom-ref and uncalled are not stored"
+X_ENCODING = (
+    "number of copies of this ALT in the called genotype, capped at this ALT's read count; "
+    "hom-ref and uncalled are not stored"
+)
 
 
 def read(path):
@@ -198,7 +201,7 @@ def test_x_is_copies_of_this_alt_in_the_called_genotype(tmp_path):
     assert a.X.dtype == np.int8
     assert (a.X.data == 0).sum() == 0
     g, t = a.var_names.get_loc("chr1:100:A:G"), a.var_names.get_loc("chr1:100:A:T")
-    assert dense(a.X)[:, g].tolist() == [1, 2, 1, 3, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0]
+    assert dense(a.X)[:, g].tolist() == [1, 2, 1, 3, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0]
     assert dense(a.X)[:, t].tolist() == [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
 
 
@@ -435,7 +438,7 @@ def test_integer_and_boolean_columns_follow_whether_they_can_be_missing(tmp_path
     types = dtypes(convert(tmp_path, name))
     for column in ["consequence_rank", "DP", "AC", "STRAND", "DISTANCE"]:
         assert types[column] == "Int64", column
-    for column in ["pos", "n_cells_covered", "n_cells_alt", "ref_reads", "alt_reads"]:
+    for column in ["start", "end", "n_cells_covered", "n_cells_alt", "ref_reads", "alt_reads"]:
         assert types[column] == "int64", column
     for column in ["is_coding", "is_lof"]:
         assert types[column] == "boolean", column
@@ -451,7 +454,7 @@ def test_is_coding_and_is_lof_are_missing_where_nothing_was_picked(tmp_path):
 def test_nullable_columns_keep_the_var_column_order(tmp_path):
     a = convert(tmp_path, "dtypes-complete.vcf")
     names = list(a.var.columns)
-    assert names[:4] == ["chrom", "pos", "ref", "alt"]
+    assert names[:5] == ["chrom", "start", "end", "ref", "alt"]
     assert names.index("consequence_rank") < names.index("is_coding") < names.index("is_lof") < names.index("pick_tier")
     assert names.index("STRAND") < names.index("DISTANCE") < names.index("REVEL_score") < names.index("consequence_rank")
     assert names[-5:] == ["DP", "AC", "SCORE", "NOTE", "SOLO"]
@@ -490,7 +493,7 @@ def test_concat_of_different_variants_cannot_keep_the_annotation_alone(tmp_path)
     first = ad.concat(samples, join="outer", merge="first", index_unique="-")
     assert set(first.var_names) == {"chr1:100:G:A", "chr1:200:C:T", "chr1:300:CA:C"}
     assert first.var["SYMBOL"].isna().tolist() == [False, False, True]
-    assert first.var["pos"].dtype == np.float64
+    assert first.var["start"].dtype == np.float64
 
 
 @pytest.mark.filterwarnings("ignore:The 'future.infer_string' option")
@@ -502,7 +505,7 @@ def test_annatar_concat_keeps_every_value(tmp_path):
     assert isinstance(adata.var["cDNA_position"].dtype, pd.CategoricalDtype)
     assert adata.var["Consequence"].notna().all()
     expected = dtypes(samples["a"])
-    for column in ["STRAND", "consequence_rank", "is_lof", "REVEL_score", "pos", "alt_reads"]:
+    for column in ["STRAND", "consequence_rank", "is_lof", "REVEL_score", "start", "alt_reads"]:
         assert dtypes(adata)[column] == expected[column], column
 
     output = tmp_path / "concat.h5ad"

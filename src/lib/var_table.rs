@@ -10,9 +10,10 @@ use crate::output::Column;
 use crate::pick::Tier;
 use crate::text::{CsqColumn, type_column};
 
-const RECORD_NAMES: [&str; 11] = [
+const RECORD_NAMES: [&str; 12] = [
     "chrom",
-    "pos",
+    "start",
+    "end",
     "ref",
     "alt",
     "id",
@@ -44,6 +45,7 @@ pub enum InfoValue {
 pub struct RecordRow {
     pub chrom: String,
     pub pos: usize,
+    pub end: i64,
     pub reference: String,
     pub alt: String,
     pub id: Option<String>,
@@ -112,7 +114,8 @@ pub struct VarTable {
     names: Vec<String>,
     seen: HashSet<String>,
     chrom: Vec<Option<String>>,
-    pos: Vec<i64>,
+    start: Vec<i64>,
+    end: Vec<i64>,
     reference: Vec<Option<String>>,
     alt: Vec<Option<String>>,
     id: Vec<Option<String>>,
@@ -173,7 +176,8 @@ impl VarTable {
             names: Vec::new(),
             seen: HashSet::new(),
             chrom: Vec::new(),
-            pos: Vec::new(),
+            start: Vec::new(),
+            end: Vec::new(),
             reference: Vec::new(),
             alt: Vec::new(),
             id: Vec::new(),
@@ -221,7 +225,7 @@ impl VarTable {
                 "variant {name} appears more than once; remove repeats with bcftools norm -d exact"
             );
         }
-        let pos = i64::try_from(row.pos)?;
+        let start = i64::try_from(row.pos)? - 1;
         let ref_reads = i64::try_from(row.ref_reads)?;
         let alt_reads = i64::try_from(row.alt_reads)?;
 
@@ -239,7 +243,8 @@ impl VarTable {
         self.seen.insert(name.clone());
         self.names.push(name);
         self.chrom.push(Some(row.chrom));
-        self.pos.push(pos);
+        self.start.push(start);
+        self.end.push(row.end);
         self.reference.push(Some(row.reference));
         self.alt.push(Some(row.alt));
         self.id.push(row.id);
@@ -278,7 +283,8 @@ impl VarTable {
     pub fn finish(self) -> VarColumns {
         let record = [
             ("chrom", Column::Text(self.chrom)),
-            ("pos", Column::Int(self.pos)),
+            ("start", Column::Int(self.start)),
+            ("end", Column::Int(self.end)),
             ("ref", Column::Text(self.reference)),
             ("alt", Column::Text(self.alt)),
             ("id", Column::Text(self.id)),
@@ -371,9 +377,9 @@ mod tests {
 
     #[test]
     fn a_csq_subfield_named_like_a_record_column_is_a_duplicate() {
-        let csq = index(&["Allele", "pos"]);
+        let csq = index(&["Allele", "start"]);
         let table = VarTable::new(&[], Some(&csq), &Exclusions::default(), false);
-        assert_eq!(table.duplicate_column(), Some("pos"));
+        assert_eq!(table.duplicate_column(), Some("start"));
     }
 
     #[test]
@@ -389,6 +395,7 @@ mod tests {
         RecordRow {
             chrom: "chr1".into(),
             pos,
+            end: i64::try_from(pos).unwrap(),
             reference: "A".into(),
             alt: alt.into(),
             id: None,
@@ -510,7 +517,8 @@ mod tests {
         for name in ["chrom", "ref", "alt", "id", "filter", "SYMBOL", "pick_tier"] {
             assert!(is_text(&df, name), "{name}");
         }
-        assert!(matches!(column(&df, "pos"), Column::Int(_)));
+        assert!(matches!(column(&df, "start"), Column::Int(_)));
+        assert!(matches!(column(&df, "end"), Column::Int(_)));
         assert!(matches!(column(&df, "alt_reads"), Column::Int(_)));
         assert!(matches!(column(&df, "AC"), Column::NullableInt(_)));
         assert!(matches!(column(&df, "INDEL"), Column::Flag(_)));
@@ -694,7 +702,8 @@ mod tests {
             names(&df),
             [
                 "chrom",
-                "pos",
+                "start",
+                "end",
                 "ref",
                 "alt",
                 "id",
@@ -822,7 +831,7 @@ mod tests {
         let table = VarTable::new(&info, Some(&csq), &Exclusions::default(), true);
         let columns = table.finish();
         assert_eq!(columns.names.len(), 0);
-        assert_eq!(columns.columns.len(), 11 + 1 + 5 + 1);
+        assert_eq!(columns.columns.len(), 12 + 1 + 5 + 1);
         assert!(columns.columns.iter().all(|(_, c)| height(c) == 0));
         assert!(is_text(&columns, "SYMBOL"));
     }

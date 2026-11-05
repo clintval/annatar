@@ -23,12 +23,17 @@ class Conversion(TypedDict):
 __version__: str
 
 def variant_order(
-    ranks: list[int], positions: list[int], references: list[str], alternates: list[str]
+    ranks: list[int],
+    starts: list[int],
+    ends: list[int],
+    references: list[str],
+    alternates: list[str],
 ) -> npt.NDArray[np.uintp]:
-    """Return the positions of variants in order of contig rank, position, REF and ALT."""
+    """Return the positions of variants in order of contig rank, start, end, REF and ALT."""
 
 def main(
     args: list[str],
+    refuse_an_input: Callable[[list[Path], Path], None],
     write_conversion: Callable[[Conversion, Path], tuple[int, int]],
     merge: Callable[[list[Path], Path], tuple[int, int]],
 ) -> int:
