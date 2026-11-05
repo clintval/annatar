@@ -4,6 +4,7 @@
 
 [![Install with bioconda](https://img.shields.io/badge/Install%20with-bioconda-brightgreen.svg)](http://bioconda.github.io/recipes/annatar/README.html)
 [![Anaconda Version](https://anaconda.org/bioconda/annatar/badges/version.svg)](http://bioconda.github.io/recipes/annatar/README.html)
+[![PyPI version](https://img.shields.io/pypi/v/annatar)](https://pypi.org/project/annatar/)
 [![Build Status](https://github.com/clintval/annatar/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/clintval/annatar/actions/workflows/ci.yml?query=branch%3Amain)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/clintval/annatar/blob/main/LICENSE)
 [![Language](https://img.shields.io/badge/language-rust-dea588.svg)](https://www.rust-lang.org/)
@@ -48,12 +49,6 @@ annatar \
 Excluding `INFO/CSQ` drops all VEP annotation.
 
 ## Python
-
-The bioconda package provides the Python package too, and pip also gives both the library and the command:
-
-```bash
-pip install annatar
-```
 
 Convert a VCF into an in-memory AnnData:
 
