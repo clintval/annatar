@@ -11,7 +11,7 @@
 
 Convert a multi-sample VCF of single cells into an AnnData h5ad.
 
-Install with mamba, conda, or run directly with pixi:
+Install with pip, mamba, conda, or run directly with pixi:
 
 ```bash
 pixi exec \
