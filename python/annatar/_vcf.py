@@ -25,13 +25,33 @@ def _array(kind: str, values: npt.NDArray[Any], extra: Any) -> Any:
     return values
 
 
+# Object strings write as string-array, which anndata 0.10 reads; pandas 3's str dtype does not.
+def _text_index(names: Any) -> pd.Index:
+    return pd.Index(names, dtype=object, name="index")
+
+
 def _frame(names: list[str], columns: list[_native.NamedColumn]) -> pd.DataFrame:
     data = {name: _array(kind, values, extra) for name, kind, values, extra in columns}
-    return pd.DataFrame(data, index=pd.Index(names, name="index"))
+    return pd.DataFrame(data, index=_text_index(names))
 
 
 def _matrix(arrays: _native.Sparse, shape: tuple[int, int]) -> csr_matrix:
     return csr_matrix(arrays, shape=shape, copy=False)
+
+
+def _to_anndata(conversion: _native.Conversion) -> AnnData:
+    shape = len(conversion["obs_names"]), len(conversion["var_names"])
+    uns = {
+        name: np.array(value, dtype=object) if isinstance(value, list) else value
+        for name, value in sorted(conversion["uns"])
+    }
+    return AnnData(
+        X=_matrix(conversion["x"], shape),
+        obs=_frame(conversion["obs_names"], conversion["obs"]),
+        var=_frame(conversion["var_names"], conversion["var"]),
+        layers={name: _matrix(arrays, shape) for name, arrays in sorted(conversion["layers"])},
+        uns=uns,
+    )
 
 
 def _call(path: StrPath, **options: Any) -> str:
@@ -64,7 +84,7 @@ def read_vcf(
         ValueError: If the file is malformed or an option is invalid.
         OSError: If a file cannot be read.
     """
-    native = _native.read_vcf(
+    conversion = _native.read_vcf(
         path,
         genes=genes,
         mane_table=mane_table,
@@ -78,15 +98,4 @@ def read_vcf(
             threads=threads if threads != 1 else None,
         ),
     )
-    shape = len(native["obs_names"]), len(native["var_names"])
-    uns = {
-        name: np.array(value, dtype=object) if isinstance(value, list) else value
-        for name, value in sorted(native["uns"])
-    }
-    return AnnData(
-        X=_matrix(native["x"], shape),
-        obs=_frame(native["obs_names"], native["obs"]),
-        var=_frame(native["var_names"], native["var"]),
-        layers={name: _matrix(arrays, shape) for name, arrays in sorted(native["layers"])},
-        uns=uns,
-    )
+    return _to_anndata(conversion)

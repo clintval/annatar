@@ -142,6 +142,11 @@ def test_the_gil_is_released_during_conversion(tmp_path):
     subprocess.run(command, check=True, timeout=60)
 
 
+def reversed_records(lines):
+    header = [line for line in lines if line.startswith("#")]
+    return header + [line for line in lines if not line.startswith("#")][::-1]
+
+
 def memory_owner(array):
     while isinstance(array.base, np.ndarray):
         array = array.base
@@ -153,6 +158,27 @@ def test_sparse_arrays_arrive_without_a_copy():
     for matrix in (adata.X, *adata.layers.values()):
         for array in (matrix.data, matrix.indices, matrix.indptr):
             assert not memory_owner(array).flags.owndata
+
+
+def test_contigs_come_from_the_header_in_its_order(tmp_path):
+    text = (DATA / "no-csq.vcf").read_text()
+    path = tmp_path / "reversed.vcf"
+    path.write_text(
+        text
+        .replace("##contig=<ID=chr1,", "##contig=<ID=TEMP,")
+        .replace("##contig=<ID=chr17,", "##contig=<ID=chr1,")
+        .replace("##contig=<ID=TEMP,", "##contig=<ID=chr17,")
+    )
+    assert list(read_quietly(path).uns["contigs"]) == ["chr17", "chr1"]
+    assert list(read_quietly(DATA / "no-records.vcf").uns["contigs"]) == ["chr1", "chr17"]
+
+
+def test_contigs_fall_back_to_the_records_without_a_header_list(tmp_path):
+    lines = (DATA / "no-csq.vcf").read_text().splitlines(keepends=True)
+    records = [line for line in lines if not line.startswith("##contig")]
+    path = tmp_path / "unlisted.vcf"
+    path.write_text("".join(reversed_records(records)))
+    assert list(read_quietly(path).uns["contigs"]) == ["chr17", "chr1"]
 
 
 def test_the_call_is_the_provenance():

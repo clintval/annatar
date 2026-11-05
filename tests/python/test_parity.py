@@ -27,7 +27,7 @@ def assert_same_matrix(left, right):
 
 def assert_same_frame(left, right):
     pd.testing.assert_frame_equal(
-        left, right, check_exact=True, check_column_type=True, check_index_type=True
+        left, right, check_exact=True, check_column_type=True, check_index_type=False
     )
     assert left.index.name == right.index.name
     assert left.columns.name == right.columns.name

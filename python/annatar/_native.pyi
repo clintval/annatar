@@ -1,5 +1,7 @@
+from collections.abc import Callable
 from collections.abc import Sequence
 from os import PathLike
+from pathlib import Path
 from typing import Any
 from typing import TypedDict
 
@@ -19,6 +21,18 @@ class Conversion(TypedDict):
     uns: list[tuple[str, str | list[str]]]
 
 __version__: str
+
+def variant_order(
+    ranks: list[int], positions: list[int], references: list[str], alternates: list[str]
+) -> npt.NDArray[np.uintp]:
+    """Return the positions of variants in order of contig rank, position, REF and ALT."""
+
+def main(
+    args: list[str],
+    write_conversion: Callable[[Conversion, Path], tuple[int, int]],
+    merge: Callable[[list[Path], Path], tuple[int, int]],
+) -> int:
+    """Parse the command line and run it, returning its exit code."""
 
 def read_vcf(
     path: str | PathLike[str],

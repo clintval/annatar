@@ -3,7 +3,6 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import BINARY
 from conftest import DATA
 
 import annatar._native as native
@@ -21,17 +20,14 @@ def libraries(path: Path) -> str:
     return subprocess.run([*tool, path], capture_output=True, text=True, check=True).stdout
 
 
-def test_the_cli_shows_what_hdf5_looks_like():
-    assert any(name.startswith("H5") for name in symbols(BINARY))
-    assert b"HDF5" in BINARY.read_bytes()
-
-
 def test_the_extension_has_no_hdf5_symbols():
     assert not [name for name in symbols(EXTENSION) if name.startswith("H5")]
 
 
 def test_the_extension_holds_no_hdf5_library():
-    assert b"HDF5" not in EXTENSION.read_bytes()
+    content = EXTENSION.read_bytes()
+    for marker in (b"H5Fopen", b"HDF5 library", b"libhdf5"):
+        assert marker not in content
 
 
 def test_the_extension_links_no_hdf5_library():

@@ -11,9 +11,9 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-REPO = Path(__file__).resolve().parents[2]
-BINARY = REPO / "target" / "release" / "annatar"
-DATA = REPO / "tests" / "data"
+from conftest import BINARY
+from conftest import DATA
+
 X_ENCODING = "number of copies of this ALT in the called genotype; hom-ref and uncalled are not stored"
 
 
@@ -49,22 +49,22 @@ def assert_same_tables(left, right):
     pd.testing.assert_frame_equal(left.obs, right.obs)
 
 
-def test_fixture_encodings(fixture_path):
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        warnings.filterwarnings("ignore", message=".*future.infer_string.*")
-        a = ad.read_h5ad(fixture_path)
-        assert a.shape == (3, 2) and a.X.dtype == np.int8 and sp.issparse(a.X)
-        assert a.layers["AD_alt"].nnz == 2 and a.layers["AD_alt"][0, 0] == 2
-        assert a.layers["VAF"].toarray()[0, 0] == 0.5
-        assert isinstance(a.var["SYMBOL"].dtype, pd.CategoricalDtype)
-        assert pd.isna(a.var["SYMBOL"].iloc[1])
-        assert np.isnan(a.var["REVEL_score"].iloc[1])
-        assert str(a.var["AC"].dtype) == "Int64" and pd.isna(a.var["AC"].iloc[1])
-        assert a.var["INDEL"].dtype == bool
-        assert a.uns["x_encoding"] == X_ENCODING
-        assert a.uns["source_vcf"] == "in.vcf"
+def test_output_encodings(tmp_path):
+    a = convert(tmp_path, "basic.vcf")
+    assert a.shape == (3, 5) and a.X.dtype == np.int8 and sp.issparse(a.X)
+    assert a.layers["AD_alt"].dtype == np.int32 and a.layers["AD_alt"][0, 0] == 3
+    assert isinstance(a.var["SYMBOL"].dtype, pd.CategoricalDtype)
+    assert pd.isna(a.var["ClinVar_CLNSIG"].iloc[0])
+    assert np.isnan(a.var["REVEL_score"].iloc[0])
+    assert str(a.var["consequence_rank"].dtype) == "Int64"
+    assert str(a.var["is_lof"].dtype) == "boolean"
+    assert a.uns["x_encoding"] == X_ENCODING
+    assert a.uns["source_vcf"] == "basic.vcf"
     md.MuData({"variants": a})
+    typed = convert(tmp_path, "typed-fields.vcf")
+    assert typed.layers["VAF"].dtype == np.float32
+    assert str(typed.var["AC"].dtype) == "Int64" and pd.isna(typed.var["AC"].iloc[4])
+    assert typed.var["SOLO"].dtype == bool
 
 
 def test_multiallelic_gives_one_column_per_alt(tmp_path):

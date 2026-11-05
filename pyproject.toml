@@ -37,6 +37,9 @@ classifiers = [
 "repository" = "https://github.com/clintval/annatar"
 "Bug Tracker" = "https://github.com/clintval/annatar/issues"
 
+[project.scripts]
+annatar = "annatar._cli:main"
+
 [build-system]
 requires      = ["maturin>=1.15,<2"]
 build-backend = "maturin"
@@ -44,16 +47,13 @@ build-backend = "maturin"
 [tool.maturin]
 python-source = "python"
 module-name   = "annatar._native"
-bindings      = "pyo3"
 features      = ["python"]
-no-default-features = true
 include       = [
     { path = "CONTRIBUTING.md", format = "sdist" },
     { path = "tests/**/*", format = "sdist" },
 ]
 exclude       = [
     { path = "tests/**/__pycache__/**/*", format = "sdist" },
-    { path = "tests/python/out/**/*", format = "sdist" },
 ]
 
 [tool.ruff]

@@ -70,7 +70,7 @@ pub fn convert(config: &Config) -> anyhow::Result<Output> {
     check_header(&header, &header_lines, csq.as_ref(), &config.exclusions)?;
     let plan = plan_fields(&header, &config.exclusions);
     check_layer_names(&plan)?;
-    let uns = provenance(
+    let mut uns = provenance(
         config,
         &header,
         csq.as_ref(),
@@ -101,8 +101,14 @@ pub fn convert(config: &Config) -> anyhow::Result<Output> {
         warn!("--mane-table is ignored: the VCF declares MANE_SELECT or MANE_PLUS_CLINICAL");
     }
 
+    let mut contigs: Vec<String> = header.contigs().keys().cloned().collect();
+    let contigs_are_listed = !contigs.is_empty();
     for record in records {
         let record = record?;
+        let contig = record.reference_sequence_name();
+        if !contigs_are_listed && !contigs.iter().any(|seen| seen == contig) {
+            contigs.push(contig.to_string());
+        }
         conversion.push_record(&record).with_context(|| {
             let position = record.variant_start().map_or(0, usize::from);
             format!("{}:{position}", record.reference_sequence_name())
@@ -128,6 +134,7 @@ pub fn convert(config: &Config) -> anyhow::Result<Output> {
         warn!("{field}: missing in {count} of the cells with reads");
     }
     warn_about_counts(skipped_alts, structural_without_entry, records_without_alt);
+    uns.push(("contigs".to_string(), UnsValue::List(contigs)));
 
     Ok(Output {
         obs_names: samples,

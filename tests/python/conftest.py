@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import sys
 import warnings
 from pathlib import Path
 
@@ -8,9 +9,8 @@ import pytest
 
 import annatar
 
-FIXTURE = Path(__file__).parent / "out" / "fixture.h5ad"
 REPO = Path(__file__).resolve().parents[2]
-BINARY = REPO / "target" / "release" / "annatar"
+BINARY = Path(sys.executable).with_name("annatar")
 DATA = REPO / "tests" / "data"
 
 
@@ -22,13 +22,6 @@ def read_quietly(path, **options):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         return annatar.read_vcf(path, **options)
-
-
-@pytest.fixture(scope="session")
-def fixture_path() -> Path:
-    if not FIXTURE.exists():
-        pytest.fail(f"missing {FIXTURE}; run `pixi run fixture-h5ad` first")
-    return FIXTURE
 
 
 @pytest.fixture

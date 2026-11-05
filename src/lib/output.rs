@@ -13,7 +13,6 @@ pub enum UnsValue {
     List(Vec<String>),
 }
 
-#[derive(Clone)]
 pub enum Column {
     Int(Vec<i64>),
     NullableInt(Vec<Option<i64>>),
