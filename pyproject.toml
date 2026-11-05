@@ -57,7 +57,7 @@ exclude       = [
 ]
 
 [tool.ruff]
-include        = ["python/**/*.py", "tests/python/*.py", ".github/smoke.py"]
+include        = ["python/**/*.py", "tests/python/*.py", "docs/example/*.py", ".github/smoke.py"]
 exclude        = ["tests/python/test_readback.py"]
 src            = [".", "python"]
 line-length    = 100

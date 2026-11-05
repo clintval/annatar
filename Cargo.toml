@@ -11,7 +11,7 @@ description = "Convert a multi-sample VCF of single cells into an AnnData h5ad."
 categories = ["command-line-utilities", "science"]
 keywords = ["bioinformatics", "VCF", "single-cell", "AnnData", "VEP"]
 publish = false
-exclude = [".github/", "pixi.lock", "pixi.toml"]
+exclude = [".github/", "docs/", "pixi.lock", "pixi.toml"]
 
 [profile.release]
 codegen-units = 16
