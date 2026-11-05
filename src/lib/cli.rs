@@ -37,12 +37,12 @@ const CARGO_STYLING: Styles = Styles::styled()
 ///
 /// Each VCF sample becomes a cell in `obs` and each ALT allele a variant in
 /// `var`. The `X` matrix holds the number of copies of this ALT in the called
-/// genotype, capped at this ALT's read count, and the `GT` layer holds them
-/// uncapped; hom-ref and uncalled are not stored. Numeric FORMAT fields become
-/// sparse layers of plain counts, with zeros and missing values not stored. VEP
-/// annotation is optional: with `INFO/CSQ`, one consequence is picked per ALT
-/// and becomes typed `var` columns. The file is written once the whole VCF has
-/// been read, so a failed run leaves no output.
+/// genotype, capped at this ALT's read count, where a missing count is zero, and
+/// the `GT` layer holds them uncapped; hom-ref and uncalled are not stored.
+/// Numeric FORMAT fields become sparse layers of plain counts, with zeros and
+/// missing values not stored. VEP annotation is optional: with `INFO/CSQ`, one
+/// consequence is picked per ALT and becomes typed `var` columns. The file is
+/// written once the whole VCF has been read, so a failed run leaves no output.
 ///
 /// EXAMPLES
 ///

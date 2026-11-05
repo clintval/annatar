@@ -1,7 +1,8 @@
 use nalgebra_sparse::CsrMatrix;
 
 pub const X_ENCODING: &str = "number of copies of this ALT in the called genotype, capped at \
-    this ALT's read count, with layers['GT'] uncapped; hom-ref and uncalled are not stored";
+    this ALT's read count, where a missing count is zero, with layers['GT'] uncapped; hom-ref and \
+    uncalled are not stored";
 
 pub enum LayerMatrix {
     I8(CsrMatrix<i8>),

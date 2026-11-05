@@ -92,11 +92,10 @@ merged = annatar.concat(['a.h5ad', 'b.h5ad'])
 #### Genotypes
 
 The `X` matrix holds the number of copies of the ALT in the called genotype, capped at that ALT's read count, so `0/1` is 1, and `1/1` is 2 with two or more alt reads and 1 with one.
-Hom-ref and uncalled cells are not stored, and neither is a call with no alt reads.
-A missing alt count (`.`) cannot cap anything, so that call keeps its copies.
-So `X > 0` means a called carrier with alt reads, and `X.sum()` never exceeds the alt reads that were counted.
+Hom-ref and uncalled cells are not stored, and neither is a call with no alt reads, where a missing alt count (`.`) is zero.
+So `X > 0` means a called carrier with alt reads, and `X.sum()` never exceeds the alt reads.
 A haploid ALT call is 1, so `X == 2` does not find it.
-Beside it, `layers['GT']` holds the copies as the VCF called them, and `X` holds those capped at the alt reads, so for imputed genotypes `adata.X = adata.layers['GT']` restores them.
+Beside it, `layers['GT']` holds the copies as the VCF called them.
 
 The other layers are read counts, with zeros and missing values not stored.
 At a variant a cell is a carrier (`X > 0`, or `AD_alt > 0` for reads), reference (`AD_ref > 0` with no `X` or `AD_alt`), or has no data.

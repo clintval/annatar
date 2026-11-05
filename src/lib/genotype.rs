@@ -4,12 +4,10 @@ pub fn copies_of_alt(alleles: &[Option<usize>], alt_index: usize) -> i8 {
     i8::try_from(copies).unwrap_or(i8::MAX)
 }
 
-/// `X` never claims more than the reads show, and a missing count cannot cap anything.
+/// `X` never claims more than the reads show, and a missing count shows no reads.
 #[must_use]
 pub fn capped_copies(copies: i8, reads: Option<i32>) -> i8 {
-    reads
-        .and_then(|reads| i8::try_from(reads).ok())
-        .map_or(copies, |reads| copies.min(reads))
+    i8::try_from(reads.unwrap_or(0)).map_or(copies, |reads| copies.min(reads))
 }
 
 #[cfg(test)]
@@ -24,8 +22,8 @@ mod tests {
     #[case(2, Some(30), 2)]
     #[case(3, Some(2), 2)]
     #[case(1, Some(0), 0)]
-    #[case(1, None, 1)]
-    #[case(2, None, 2)]
+    #[case(1, None, 0)]
+    #[case(2, None, 0)]
     #[case(0, Some(4), 0)]
     #[case(1, Some(1000), 1)]
     fn copies_are_capped_at_the_alt_count(

@@ -16,7 +16,8 @@ from conftest import DATA
 
 X_ENCODING = (
     "number of copies of this ALT in the called genotype, capped at this ALT's read count, "
-    "with layers['GT'] uncapped; hom-ref and uncalled are not stored"
+    "where a missing count is zero, with layers['GT'] uncapped; "
+    "hom-ref and uncalled are not stored"
 )
 
 
@@ -201,7 +202,7 @@ def test_x_is_copies_of_this_alt_in_the_called_genotype(tmp_path):
     assert a.X.dtype == np.int8
     assert (a.X.data == 0).sum() == 0
     g, t = a.var_names.get_loc("chr1:100:A:G"), a.var_names.get_loc("chr1:100:A:T")
-    assert dense(a.X)[:, g].tolist() == [1, 2, 1, 3, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0]
+    assert dense(a.X)[:, g].tolist() == [1, 2, 1, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     assert dense(a.X)[:, t].tolist() == [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
 
 
