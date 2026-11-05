@@ -50,12 +50,9 @@ Convert a VCF into an in-memory AnnData, or merge libraries, from Python:
 import annatar
 
 adata = annatar.read_vcf('cells.vcf.gz')
-merged = annatar.concat(['a.h5ad', 'b.h5ad'])
 ```
 
 The `read_vcf` function takes `genes`, `mane_table`, `exclude_fields` and `threads`, which match the flags above, and gives the same contents as the h5ad.
-Errors raise exceptions with the same messages, and warnings go through the Python `warnings` module.
-The info line for a VCF with no `INFO/CSQ` does not reach Python.
 
 Nothing is on PyPI yet, so build the package from the repository with Rust:
 
