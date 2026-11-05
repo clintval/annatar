@@ -1,4 +1,4 @@
-![Banner for annatar](https://raw.githubusercontent.com/clintval/annatar/main/.github/img/annatar_banner.svg)
+![Banner for annatar](https://raw.githubusercontent.com/clintval/annatar/main/.github/img/annatar_banner.svg?v=2)
 
 ---
 
@@ -57,7 +57,7 @@ annatar merge --output 'merged.h5ad' 'a.h5ad' 'b.h5ad'
 ```
 
 Cells become `barcode-library`, named after each file, and `obs['library']` holds the library's name.
-Variants are the union of the libraries, sorted by VCF header contig order, then `pos`, `ref` and `alt`.
+Variants are the union of the libraries, sorted by VCF header contig order, then `start`, `end`, `ref` and `alt`.
 The columns `n_cells_covered`, `n_cells_alt`, `ref_reads` and `alt_reads` are recounted from the merged layers.
 Any other `var` value on a shared variant, such as `qual` or an INFO field, comes from the first library holding it, and later libraries fill only the columns that library lacks entirely.
 A column that is text in one library and numeric in another stays text.
@@ -83,7 +83,7 @@ merged = annatar.concat(['a.h5ad', 'b.h5ad'])
 
 | Slot | Contents |
 | --- | --- |
-| `X` | Copies of each ALT in each cell's called genotype |
+| `X` | Copies of each ALT in each cell's called genotype, capped at its read count |
 | `layers` | Numeric FORMAT fields, such as `AD_ref`, `AD_alt` and `DP` |
 | `obs` | Per-cell counts, `n_sites_covered` and `n_sites_alt` |
 | `var` | One row per ALT allele, named `chrom:pos:ref:alt` |
@@ -91,8 +91,10 @@ merged = annatar.concat(['a.h5ad', 'b.h5ad'])
 
 #### Genotypes
 
-The `X` matrix holds the number of copies of the ALT in the called genotype, so `0/1` is 1 and `1/1` is 2, and hom-ref and uncalled cells are not stored.
-So `X > 0` means a called carrier and `X.sum()` counts ALT haplotypes.
+The `X` matrix holds the number of copies of the ALT in the called genotype, capped at that ALT's read count, so `0/1` is 1, and `1/1` is 2 with two or more alt reads and 1 with one.
+Hom-ref and uncalled cells are not stored, and neither is a call with no alt reads.
+A missing alt count (`.`) cannot cap anything, so that call keeps its copies.
+So `X > 0` means a called carrier with alt reads, and `X.sum()` never exceeds the alt reads that were counted.
 A haploid ALT call is 1, so `X == 2` does not find it.
 
 Layers are read counts, with zeros and missing values not stored.
@@ -101,6 +103,7 @@ A cell with reads but no call keeps them in the layers, and `AD_alt` counts alt 
 
 #### Variants
 
+The `start` and `end` columns are 0-based and half-open, as in BED, while a variant's `chrom:pos:ref:alt` name keeps the VCF's 1-based position.
 Every ALT gets its own row, whether it is an SNV, indel, MNV, symbolic ALT or breakend.
 The placeholder alleles `*`, `<*>` and `<NON_REF>` get no row.
 The VCF must declare `FORMAT/AD`.
