@@ -52,9 +52,9 @@ Excluding `INFO/CSQ` drops all annotation. The fields `FORMAT/AD` and `FORMAT/GT
 | `var` | One row per ALT allele, named `chrom:pos:ref:alt` |
 | `uns` | Provenance and the encoding of `X` |
 
-### Genotypes
+#### Genotypes
 
-`X` holds the number of copies of the ALT in the called genotype, so `0/1` is 1 and `1/1` is 2, and hom-ref and uncalled cells are not stored.
+The `X` matrix holds the number of copies of the ALT in the called genotype, so `0/1` is 1 and `1/1` is 2, and hom-ref and uncalled cells are not stored.
 So `X > 0` means a called carrier and `X.sum()` counts ALT haplotypes.
 A haploid ALT call is 1, so `X == 2` does not find it.
 
@@ -62,13 +62,13 @@ Layers are read counts, with zeros and missing values not stored.
 At a variant a cell is a carrier (`X > 0`, or `AD_alt > 0` for reads), reference (`AD_ref > 0` with no `X` or `AD_alt`), or has no data.
 A cell with reads but no call keeps them in the layers, and `AD_alt` counts alt reads in cells called `0/0`.
 
-### Variants
+#### Variants
 
 Every ALT gets its own row, whether it is an SNV, indel, MNV, symbolic ALT or breakend.
 The placeholder alleles `*`, `<*>` and `<NON_REF>` get no row.
 The VCF must declare `FORMAT/AD`.
 
-### VEP Annotation
+#### VEP Annotation
 
 VEP is optional.
 When the VCF has `INFO/CSQ`, one consequence per variant is added to `var` with its VEP subfield names, along with these columns:
@@ -84,16 +84,17 @@ When the VCF has `INFO/CSQ`, one consequence per variant is added to `var` with 
 Column types are fixed for VEP 116, so a column has the same type in every file.
 Other VEP versions run with a warning.
 
-Split multiallelic records before running VEP, not after.
-annatar stops on evidence of a split after VEP, including a `bcftools norm` split line in the header, even if no record changed.
-It cannot detect a split after `--pick` when neither `--allele_number` nor that header line is there.
-annatar refuses `--minimal` output, so run VEP without it.
-Pass `--allele_number` to VEP so symbolic ALTs and breakends match by position.
+> [!IMPORTANT]
+> Split multiallelic records before running VEP, not after.
+> annatar stops on evidence of a split after VEP, including a `bcftools norm` split line in the header, even if no record changed.
+> It cannot detect a split after `--pick` when neither `--allele_number` nor that header line is there.
+> annatar refuses `--minimal` output, so run VEP without it.
+> Pass `--allele_number` to VEP so symbolic ALTs and breakends match by position.
 
 ## Merging Libraries
 
 Merge the h5ad files of several libraries into one AnnData.
-`anndata.concat` loses `var` annotation when the files hold different variants, so rebuild `var` from the inputs:
+The `anndata.concat` function loses `var` annotation when the files hold different variants, so rebuild `var` from the inputs:
 
 ```python
 import anndata as ad
@@ -106,12 +107,12 @@ adata.var = var[~var.index.duplicated()].reindex(adata.var_names)
 ```
 
 After merging, read counts in `var`, such as `alt_reads`, describe the first file with that variant.
-`X` and the layers keep every stored value, since neither stores a zero.
+The `X` matrix and the layers keep every stored value, since neither stores a zero.
 
 ## MuData Example
 
 Color the cells that carry a pathogenic TP53 variant on a chromatin UMAP.
-`MuData` lines the modalities up by cell barcode, and cells with no reads at these variants stay gray:
+A `MuData` object lines the modalities up by cell barcode, and cells with no reads at these variants stay gray:
 
 ```python
 import anndata as ad
