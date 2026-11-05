@@ -1,4 +1,4 @@
-![Banner for annatar](https://raw.githubusercontent.com/clintval/annatar/main/.github/img/annatar_banner.svg)
+![Banner for annatar](.github/img/annatar_banner.svg)
 
 ---
 
