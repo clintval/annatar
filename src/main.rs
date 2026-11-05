@@ -38,8 +38,9 @@ const CARGO_STYLING: Styles = Styles::styled()
 /// Convert a multi-sample VCF of single cells into an h5ad.
 ///
 /// Each VCF sample becomes a cell in `obs` and each ALT allele a variant in
-/// `var`. The `X` matrix holds the copies of this ALT in the called genotype;
-/// hom-ref and uncalled are not stored. Numeric FORMAT fields become sparse
+/// `var`. The `X` matrix holds the
+/// number of copies of this ALT in the called genotype; hom-ref and uncalled
+/// are not stored. Numeric FORMAT fields become sparse
 /// layers of plain counts, with zeros and missing values not stored.
 /// VEP annotation is optional: with `INFO/CSQ`, one consequence is picked per
 /// ALT and becomes typed `var` columns. The file is written once the whole VCF
