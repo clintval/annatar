@@ -134,7 +134,7 @@ Other VEP versions run with a warning.
 ## MuData Example
 
 Color the cells that carry a pathogenic TP53 variant on a chromatin UMAP, with a VCF and a chromatin h5ad in `docs/example/` that share cell barcodes.
-Both files are simulated, because this project has no real dataset yet that links chromatin to mutations by cell barcode, so read the figure as a demonstration and not a result.
+Both files are simulated, so read the figure as a demonstration and not a result.
 
 From a clone of this repository, convert the VCF:
 
