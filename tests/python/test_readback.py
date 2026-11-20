@@ -99,7 +99,7 @@ def test_allele_number_matches_by_position_in_the_alt_list(tmp_path):
     assert a.var.loc["chr1:200:AT:ATT", "Consequence"] == "frameshift_variant"
     assert a.var.loc["chr1:300:C:C[chr1:900[", "Allele"] == "C[chr1:900["
     assert a.var.loc["chr1:300:C:C[chr1:900[", "Consequence"] == "coding_sequence_variant"
-    assert a.var.loc["chr1:400:C:<DEL>", "Allele"] == "deletion"
+    assert a.var.loc["chr1:400:C:<DEL>:900", "Allele"] == "deletion"
     assert a.var.loc["chr1:500:A:G", "Consequence"] == "missense_variant"
     assert a.var.loc["chr1:600:A:<STR4>", "Allele"] == "short_tandem_repeat"
 
@@ -107,13 +107,13 @@ def test_allele_number_matches_by_position_in_the_alt_list(tmp_path):
 @pytest.mark.parametrize(
     ("variant", "allele", "consequence"),
     [
-        ("chr1:100:C:<DEL>", "deletion", "feature_truncation"),
-        ("chr1:200:C:<DUP>", "duplication", "feature_elongation"),
+        ("chr1:100:C:<DEL>:900", "deletion", "feature_truncation"),
+        ("chr1:200:C:<DUP>:900", "duplication", "feature_elongation"),
         ("chr1:300:C:<INS>", "insertion", "intron_variant"),
         ("chr1:400:C:C[chr1:900[", "C[chr1:900[", "coding_sequence_variant"),
         ("chr1:500:g:a", "A", "stop_gained"),
-        ("chr1:700:A:<DEL>", "copy_number_variation", "feature_truncation"),
-        ("chr1:700:A:<DUP>", "copy_number_variation", "feature_truncation"),
+        ("chr1:700:A:<DEL>:900", "copy_number_variation", "feature_truncation"),
+        ("chr1:700:A:<DUP>:900", "copy_number_variation", "feature_truncation"),
         ("chr1:800:a:ag", "G", "stop_gained"),
         ("chr1:800:a:at", "T", "missense_variant"),
         ("chr1:900:C:C[chr1:901[", "C[chr1:901[", "coding_sequence_variant"),
@@ -135,7 +135,7 @@ def test_a_lowercase_variant_keeps_the_case_of_the_vcf_in_its_name(tmp_path):
 
 @pytest.mark.parametrize(
     ("name", "variant", "allele"),
-    [("symbolic-csq.vcf", "chr1:100:A:<DEL>", "deletion"), ("breakend-csq.vcf", "chr1:100:A:A[chr1:500[", "A[chr1:500[")],
+    [("symbolic-csq.vcf", "chr1:100:A:<DEL>:900", "deletion"), ("breakend-csq.vcf", "chr1:100:A:A[chr1:500[", "A[chr1:500[")],
 )
 def test_vep_true_symbolic_and_breakend_records_convert(tmp_path, name, variant, allele):
     a = convert(tmp_path, name)
@@ -186,8 +186,8 @@ def test_header_order_survives_in_bcf(tmp_path, name, stops):
 def test_a_structural_alt_with_no_entry_keeps_an_empty_row(tmp_path):
     a = convert(tmp_path, "structural-no-entry.vcf")
     assert a.var.loc["chr1:100:A:G", "Consequence"] == "missense_variant"
-    assert pd.isna(a.var.loc["chr1:100:A:<DEL>", "Consequence"])
-    assert a.var.loc["chr1:100:A:<DEL>", "alt_reads"] == 3
+    assert pd.isna(a.var.loc["chr1:100:A:<DEL>:900", "Consequence"])
+    assert a.var.loc["chr1:100:A:<DEL>:900", "alt_reads"] == 3
     assert a.var.loc["chr1:200:C:C[chr1:900[", "Consequence"] == "intron_variant"
     assert pd.isna(a.var.loc["chr1:200:C:C[chr1:901[", "Consequence"])
 

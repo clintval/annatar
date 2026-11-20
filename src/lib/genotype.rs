@@ -4,7 +4,7 @@ pub fn copies_of_alt(alleles: &[Option<usize>], alt_index: usize) -> i8 {
     i8::try_from(copies).unwrap_or(i8::MAX)
 }
 
-/// `X` never claims more than the reads show, and a missing count shows no reads.
+/// The `X` matrix never claims more than the reads hold, and a missing count is no reads.
 #[must_use]
 pub fn capped_copies(copies: i8, reads: Option<i32>) -> i8 {
     i8::try_from(reads.unwrap_or(0)).map_or(copies, |reads| copies.min(reads))

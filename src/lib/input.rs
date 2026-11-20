@@ -25,7 +25,7 @@ pub struct VariantSource {
     pub records: Box<dyn Iterator<Item = io::Result<RecordBuf>>>,
 }
 
-// `Header` groups lines by key, which loses their order across keys, so the raw lines are kept.
+// The noodles `Header` groups lines by key, which loses their order across keys, so the raw lines are kept.
 struct HeaderTee {
     inner: Box<dyn BufRead + Send>,
     seen: Option<Vec<u8>>,
@@ -159,14 +159,9 @@ fn is_bgzf(head: &[u8]) -> bool {
     false
 }
 
+// noodles has no position for POS 0, which the VCF spec allows for a telomere.
 fn position(start: Option<io::Result<noodles::core::Position>>) -> io::Result<usize> {
-    match start {
-        Some(result) => result.map(usize::from),
-        None => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "missing position",
-        )),
-    }
+    start.map_or(Ok(0), |result| result.map(usize::from))
 }
 
 fn record_iter<R>(

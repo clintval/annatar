@@ -307,7 +307,7 @@ fn check_not_split(
         });
         if named.len() > 1 {
             bail!(
-                "a record with one ALT names the CSQ alleles {}, so it was split after VEP; \
+                "a record with one ALT lists the CSQ alleles {}, so it was split after VEP; \
                 annotate after splitting",
                 named.join(", ")
             );
@@ -369,7 +369,7 @@ pub fn entries_for_allele(
     if !own.is_empty() {
         return Ok(own);
     }
-    // Spelling failed, so a numbered entry that names a mate belongs to a sibling breakend.
+    // Spelling failed, so a numbered entry that refers to a mate belongs to a sibling breakend.
     let own: Vec<usize> = numbered_entries(entries, index, allele)
         .unwrap_or_default()
         .into_iter()
@@ -1094,7 +1094,7 @@ mod tests {
         assert_eq!(
             refused(&rows, &index, &alt(vcf_alt, spelling, 1, 1)),
             format!(
-                "a record with one ALT names the CSQ alleles {alleles}, so it was split after \
+                "a record with one ALT lists the CSQ alleles {alleles}, so it was split after \
                 VEP; annotate after splitting"
             )
         );

@@ -103,7 +103,7 @@ A cell with reads but no call keeps them in the layers, and `AD_alt` counts alt 
 
 #### Variants
 
-The `start` and `end` columns are 0-based and half-open, as in BED, while a variant's `chrom:pos:ref:alt` name keeps the VCF's 1-based position.
+The `start` and `end` columns are 0-based and half-open, as in BED, while a variant's `chrom:pos:ref:alt` name keeps the VCF's 1-based position. When `INFO/END` carries a structural call past its REF, the name gains `:end`, as in `chr1:1000:N:<DEL>:2000`, so calls at one position with different ends stay apart.
 Every ALT gets its own row, whether it is an SNV, indel, MNV, symbolic ALT or breakend.
 The placeholder alleles `*`, `<*>` and `<NON_REF>` get no row.
 The VCF must declare `FORMAT/AD`.
