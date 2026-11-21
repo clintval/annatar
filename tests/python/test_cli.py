@@ -167,7 +167,9 @@ def test_alleles_vep_spells_its_own_way_match_without_warning(name, tmp_path):
 
 
 SPLIT = "so it was split after VEP; annotate after splitting"
-NORM = "the header shows bcftools norm splitting multiallelics after VEP; annotate after splitting"
+NORM = (
+    "the header records bcftools norm splitting multiallelics after VEP; annotate after splitting"
+)
 
 
 @pytest.mark.parametrize(
@@ -204,27 +206,27 @@ NORM = "the header shows bcftools norm splitting multiallelics after VEP; annota
         (
             "split-after-vep.vcf",
             "chr1:100",
-            f"a record with one ALT names the CSQ alleles G, AT, {SPLIT}",
+            f"a record with one ALT lists the CSQ alleles G, AT, {SPLIT}",
         ),
         (
             "split-after-vep-allele-number.vcf",
             "chr1:100",
-            f"a record with one ALT names the CSQ alleles G, AT, {SPLIT}",
+            f"a record with one ALT lists the CSQ alleles G, AT, {SPLIT}",
         ),
         (
             "split-after-vep-snv.vcf",
             "chr1:100",
-            f"a record with one ALT names the CSQ alleles A, T, {SPLIT}",
+            f"a record with one ALT lists the CSQ alleles A, T, {SPLIT}",
         ),
         (
             "split-after-vep-breakend.vcf",
             "chr1:100",
-            "a record with one ALT names the CSQ alleles C[chr1:901[, C[chr1:902[, so it was split",
+            "a record with one ALT lists the CSQ alleles C[chr1:901[, C[chr1:902[, so it was split",
         ),
         (
             "split-collide.vcf",
             "chr1:100",
-            f"a record with one ALT names the CSQ alleles CT, T, {SPLIT}",
+            f"a record with one ALT lists the CSQ alleles CT, T, {SPLIT}",
         ),
         (
             "pick-then-split.vcf",
@@ -299,18 +301,22 @@ def test_an_error_input_fails_naming_the_problem_and_writes_nothing(name, locus,
         (
             "basic.vcf",
             "INFO/CSQ/symbol",
-            "--exclude-field INFO/CSQ/symbol names nothing in this VCF's header",
+            "--exclude-field INFO/CSQ/symbol matches nothing in this VCF's header",
         ),
         (
             "basic.vcf",
             "INFO/SYMBOL",
-            "--exclude-field INFO/SYMBOL names nothing in this VCF's header",
+            "--exclude-field INFO/SYMBOL matches nothing in this VCF's header",
         ),
-        ("basic.vcf", "FORMAT/dp", "--exclude-field FORMAT/dp names nothing in this VCF's header"),
+        (
+            "basic.vcf",
+            "FORMAT/dp",
+            "--exclude-field FORMAT/dp matches nothing in this VCF's header",
+        ),
         (
             "no-csq.vcf",
             "INFO/SYMBOL",
-            "--exclude-field INFO/SYMBOL names nothing in this VCF's header",
+            "--exclude-field INFO/SYMBOL matches nothing in this VCF's header",
         ),
     ],
 )
@@ -337,16 +343,30 @@ def test_coordinates_are_zero_based_and_half_open(load, tmp_path):
         "chr1:100:A:G": (99, 100),
         "chr1:200:TTC:T": (199, 202),
         "chr1:300:A:ACGT": (299, 300),
-        "chr1:400:A:<DEL>": (399, 500),
+        "chr1:400:A:<DEL>:500": (399, 500),
         "chr1:600:C:<DEL>": (599, 600),
         "chr1:700:G:G]chr2:50]": (699, 700),
         "chr1:800:TA:T": (799, 801),
-        "chr1:800:TA:<DEL>": (799, 950),
+        "chr1:800:TA:<DEL>:950": (799, 950),
     }
     assert var["start"].dtype == var["end"].dtype == np.int64
     assert list(var.columns[:3]) == ["chrom", "start", "end"]
     assert "pos" not in var
     assert var["END"].notna().sum() == 3
+
+
+@pytest.mark.parametrize("name", ["telomere.vcf", "telomere.bcf"])
+def test_a_telomeric_record_at_pos_zero_converts(name, tmp_path):
+    succeeded(DATA / name, tmp_path / "out.h5ad")
+    var = ad.read_h5ad(tmp_path / "out.h5ad").var
+    assert var.loc["chr1:0:N:.[chr2:500[", ["start", "end"]].tolist() == [-1, 0]
+
+
+def test_structural_calls_at_one_position_keep_their_own_rows(tmp_path):
+    succeeded(DATA / "same-position-svs.vcf", tmp_path / "out.h5ad")
+    var = ad.read_h5ad(tmp_path / "out.h5ad").var
+    assert list(var.index) == ["chr1:1000:A:<DEL>:2000", "chr1:1000:A:<DEL>:5000"]
+    assert var["end"].tolist() == [2000, 5000]
 
 
 def test_a_header_with_no_csq_gets_one_info_line_and_no_warning(tmp_path):

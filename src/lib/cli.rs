@@ -78,9 +78,10 @@ enum Command {
 /// Merge annatar's h5ad files, one per library, into one h5ad.
 ///
 /// Each input is one library, named after its file. Barcodes gain the library
-/// name, `obs["library"]` names the library, and variants are the union, sorted
-/// by VCF header contig order, `start`, `end`, `ref` and `alt`. A shared variant
-/// takes its whole `var` row from the first library holding it, and
+/// name, `obs["library"]` holds the library name, and variants are the union,
+/// sorted by VCF header contig order, `start`, `end`, `ref` and `alt`. A shared
+/// variant takes each `var` value from the first library holding it, and later
+/// libraries fill only the columns the first lacks entirely. The columns
 /// `n_cells_covered`, `n_cells_alt`, `ref_reads` and `alt_reads` are recounted
 /// from the merged layers. The file is written once every input has been read,
 /// so a failed run leaves no output.

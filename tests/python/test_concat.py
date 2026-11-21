@@ -259,3 +259,17 @@ def test_gt_merges_like_any_layer():
 def test_nothing_to_merge_raises():
     with pytest.raises(ValueError):
         annatar.concat([])
+
+
+def test_structural_calls_at_one_position_stay_apart_in_a_merge():
+    calls = read("same-position-svs.vcf")
+    merged = annatar.concat({"a": calls[:, [0]].copy(), "b": calls[:, [1]].copy()})
+    assert list(merged.var_names) == ["chr1:1000:A:<DEL>:2000", "chr1:1000:A:<DEL>:5000"]
+    assert merged.var["end"].tolist() == [2000, 5000]
+    assert merged.var["alt_reads"].tolist() == [3, 2]
+
+
+def test_a_path_that_cannot_be_read_raises_an_os_error(tmp_path):
+    with pytest.raises(OSError) as raised:
+        annatar.concat([tmp_path])
+    assert not isinstance(raised.value, ValueError)

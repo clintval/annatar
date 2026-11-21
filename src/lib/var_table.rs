@@ -219,7 +219,11 @@ impl VarTable {
             }
             None => (None, None, None),
         };
-        let name = variant_name(&row.chrom, row.pos, &row.reference, &row.alt);
+        let mut name = variant_name(&row.chrom, row.pos, &row.reference, &row.alt);
+        // Structural calls at one position differ only by INFO/END, so the name carries it.
+        if row.end != i64::try_from(row.pos + row.reference.len())? - 1 {
+            name = format!("{name}:{}", row.end);
+        }
         if self.seen.contains(&name) {
             bail!(
                 "variant {name} appears more than once; remove repeats with bcftools norm -d exact"
@@ -807,6 +811,20 @@ mod tests {
         assert_eq!(ints(&df, "DP4_2"), [Some(8)]);
         assert_eq!(floats(&df, "AF_ref"), [0.1]);
         assert_eq!(floats(&df, "AF_alt"), [0.9]);
+    }
+
+    #[test]
+    fn structural_calls_at_one_position_are_told_apart_by_their_end() {
+        let mut table = VarTable::new(&[], None, &Exclusions::default(), false);
+        for end in [2000, 5000] {
+            let mut call = row(1000, "<DEL>");
+            call.end = end;
+            table.push(call, vec![], None, None).unwrap();
+        }
+        assert_eq!(
+            table.finish().names,
+            ["chr1:1000:A:<DEL>:2000", "chr1:1000:A:<DEL>:5000"]
+        );
     }
 
     #[test]

@@ -39,6 +39,9 @@ def _named(items: Mapping[str, StrPath | AnnData] | Iterable[StrPath | AnnData])
 def _read(path: StrPath) -> AnnData:
     if not Path(path).exists():
         raise FileNotFoundError(f"opening {path}: No such file or directory")
+    # h5py reports a file that is not HDF5 as an OSError too, so readability is checked first.
+    with open(path, "rb"):
+        pass
     try:
         return ad.read_h5ad(path)
     except Exception as error:
@@ -155,7 +158,7 @@ def _canonical(matrix: Any, dtype: Any) -> Any:
 def concat(items: Mapping[str, StrPath | AnnData] | Iterable[StrPath | AnnData]) -> AnnData:
     """Merge libraries into one AnnData, keeping every variant's annotation.
 
-    Cells keep their barcodes with the library name appended and name their library in
+    Cells keep their barcodes with the library name appended and record their library in
     `obs["library"]`, so merging a merged file appends a library name again. An `obs` column some
     libraries lack is missing for their cells. Variants are the union of the libraries, sorted by
     contig in the order of `uns["contigs"]`, then `start`, `end`, `ref` and `alt`. A contig on no
@@ -165,8 +168,8 @@ def concat(items: Mapping[str, StrPath | AnnData] | Iterable[StrPath | AnnData])
     fill only the columns that library lacks entirely.
 
     Args:
-        items: Paths to h5ad files or AnnData objects. A mapping names each library, otherwise a
-            file is named after its path and an AnnData after its position.
+        items: Paths to h5ad files or AnnData objects. A mapping gives each library its name,
+            otherwise a file is named after its path and an AnnData after its position.
 
     Returns:
         The merged AnnData.

@@ -193,11 +193,11 @@ fn check_header(
     check_not_minimal(header, csq)?;
     if csq.is_some() && split_after_vep(header_lines) {
         bail!(
-            "the header shows bcftools norm splitting multiallelics after VEP; annotate after splitting"
+            "the header records bcftools norm splitting multiallelics after VEP; annotate after splitting"
         );
     }
     if let Some(name) = exclusions.undeclared(header, csq).first() {
-        bail!("--exclude-field {name} names nothing in this VCF's header");
+        bail!("--exclude-field {name} matches nothing in this VCF's header");
     }
     let Some(ad) = header.formats().get("AD") else {
         bail!("the VCF declares no FORMAT/AD; with bcftools mpileup, add --annotate FORMAT/AD");
